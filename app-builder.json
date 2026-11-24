@@ -10,17 +10,36 @@
       "Development"
     ],
     "author": {
-      "name": "fsender"
+      "github": "fsender",
+      "display_name": "fsender"
     },
     "license": "MIT (source code); GPL-2.0 (binary bundles WenQuanYi Bitmap Song font data)",
     "source_repo": "https://github.com/fsender/cardterm",
     "share_code": "TERM",
-    "permissions": [],
-    "icon": "packaging/cardterm_100.png",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": false,
+      "additional_hardware": false,
+      "background_service": false,
+      "external_display": false
+    },
+    "icon": "packaging/cardterm_256.png",
     "screenshots": [
       "docs/img/store/1-initial-bash.png",
       "docs/img/store/2-fastfetch-4x7.png",
       "docs/img/store/3-cmatrix-8x14.png"
-    ]
+    ],
+    "locales": {
+      "zh-CN": {
+        "title": "cardterm",
+        "summary": "CardputerZero 全屏终端模拟器：xterm 兼容、TUI 友好、主题与背景图可定制、极低内存"
+      },
+      "en": {
+        "title": "cardterm",
+        "summary": "Fullscreen terminal emulator: xterm-compatible, TUI-ready, customizable theme & wallpaper, tiny footprint"
+      }
+    }
   }
 }
