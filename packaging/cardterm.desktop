@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=cardterm
+TryExec=/usr/share/APPLaunch/bin/cardterm
+Exec=/usr/share/APPLaunch/bin/cardterm
+Terminal=false
+Icon=/usr/share/APPLaunch/share/images/cardterm_100.png
+Type=Application

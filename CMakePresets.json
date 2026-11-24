@@ -1,0 +1,39 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "aarch64-cross",
+      "displayName": "aarch64 Release（.deb 分发线）",
+      "description": "主机 x86_64 → 设备 aarch64（树莓派 CM0），Release (-O3 -DNDEBUG)，产物 build/cardterm 供 packaging/build-deb.sh 打包 APPLaunch 应用",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "aarch64-debug",
+      "displayName": "aarch64 Debug（~/apps/cardterm 维护线）",
+      "description": "主机 x86_64 → 设备 aarch64（树莓派 CM0），Debug (-g -O0，带调试符号便于排查)，产物 build-debug/cardterm 供 deploy.sh 部署到设备 ~/apps/cardterm",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-debug",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "aarch64-cross",
+      "configurePreset": "aarch64-cross",
+      "displayName": "构建 cardterm aarch64 Release"
+    },
+    {
+      "name": "aarch64-debug",
+      "configurePreset": "aarch64-debug",
+      "displayName": "构建 cardterm aarch64 Debug"
+    }
+  ]
+}

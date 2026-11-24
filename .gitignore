@@ -1,0 +1,19 @@
+# 构建产物
+/build/
+/build-debug/
+/dist/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# 运行抓帧/截图产物
+/shots/
+*.raw
+
+# 杂项
+*.o
+*.log
+
+# clangd 缓存
+.cache/
