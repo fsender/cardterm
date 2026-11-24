@@ -3,40 +3,39 @@
 **English** | [简体中文](README.zh-CN.md)
 
 **A fullscreen terminal emulator for the CardputerZero (M5Stack C154)**:
-direct `/dev/fb0` rendering, PTY, Unicode bitmap fonts (6×10 / 4×7 / 8×14),
-multi-window, scrollback, ANSI 16/256/truecolor, kitty keyboard protocol.
+direct `/dev/fb0` rendering, PTY, Unicode bitmap fonts, multi-window, scrollback,
+ANSI 16/256/truecolor, kitty keyboard protocol.
 
-![htop @ 80×24 (4×7 small font)](docs/img/0.4.2-htop-80x24.png)
+![fastfetch](docs/img/fastfetch.png)
 
-| 4×7 small font (80×24) | 6×10 default (53×17, wallpaper) |
-|---|---|
-| ![4×7](docs/img/0.4.2-font-4x7.png) | ![6×10](docs/img/0.4.2-default-6x10.png) |
+| 4×7 small font (80×24) | 6×10 default (53×17) | 8×14 large font (40×12) |
+|---|---|---|
+| ![4×7](docs/img/0.4.2-font-4x7.png) | ![6×10](docs/img/init_font_6x10.png) | ![8×14](docs/img/init_font_8x14.png) |
 
 ## Features
 
-- **Pure fbdev**: LovyanGFX → `Panel_fb` → `mmap /dev/fb0`; no SDL/X11. 320×170 RGB565.
-- **Exclusive display session**: freezes APPLaunch on entry (SIGSTOP, never kills it),
-  quiets the VT, grabs the keyboard (`EVIOCGRAB`), snapshots the screen; restores
-  everything pixel-perfect on exit or when killed by a signal.
-- **PTY terminal**: `xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=cardterm`;
-  `winsize`/`COLUMNS`/`LINES` follow the font grid.
-- **12 windows**: `Ctrl+Alt+F1~F12` to switch; built-in minimal launcher (`help`, any command).
-- **Scrollback**: `PgUp/PgDn` (with Shift) / `Ctrl+Shift+↑↓`; depth = `[scrollback] lines`.
-- **ANSI**: SGR 16/256/38;2 truecolor, reverse video, CUP/ED/EL, DECCKM, DEC ACS
-  (`ESC(0`), tab stops, insert/erase, REP, DA/DSR, OSC/DCS, kitty keyboard flags.
-- **Three monospace bitmap fonts** (compiled in; per-window size switching):
-  - `6×10` → 53×17: glcdfont ASCII + BoutiqueBitmap9x9 + Fusion Pixel 10px fallback;
-  - `4×7` → 80×24: hand-drawn 4×6 ASCII + ChillBitmap 8px CJK + Fusion Pixel 8px fallback
-    (29,081 glyphs); dots (●○••) hand-drawn 4×7;
-  - `8×14` → 40×12: WenQuanYi Bitmap Song 14px CJK (13×13 ink, double-width) +
-    hand-drawn Latin 7×13, plus parametric box-drawing/blocks/braille;
-  - **Box drawing & block elements redrawn per cell** so TUI borders stay seamless at every
-    size; quadrants/half-blocks split exactly — `qrencode -t UTF8` renders correctly.
-- **Zero-width characters** (VS15/16, combining marks, ZWJ…) take no cell and never
-  produce tofu — inline code spans from TUIs like crush display cleanly.
-- **Looks**: `background_color` / `background_image` (PNG/JPG scaled to fill),
-  fully customizable 16-color palette.
-- Font license texts ship with the `.deb` (`/usr/share/doc/cardterm/fonts/`).
+- **Customizable terminal theme** — every color of the 16-color ANSI palette, the cursor
+  color and truecolor (`SGR 38;2`) are individually configurable.
+- **Custom wallpaper** — PNG/JPG scaled to fill the screen, with transparent-background
+  semantics (default background shows the wallpaper through).
+- **TUI compatibility** — crush / opencode / codex / vim / htop / nano / nmtui and more
+  render and interact correctly; alternate screen, scroll regions and redraw pacing
+  behave as TUIs expect.
+- **Kitty keyboard protocol (KKP)** — full support of the flags we claim, with push/pop
+  and query.
+- **Protocol support** — `OSC 4/10/11/12/52/110-112`, `DA1/DA2/DECXCPR/DSR/DECRQM`,
+  `DECSCUSR`, `DECSTR/RIS` and friends.
+- **USB / Bluetooth keyboard takeover** — onboard keyboard plus up to four external
+  keyboards in parallel, standard US layout, hot-pluggable.
+- **Lightweight** — extremely low memory footprint (~6 MB RSS in steady state).
+- **CJK glyph support** — CJK text renders from the built-in bitmap fonts.
+- **Three terminal grid sizes** — 80×24 / 53×17 / 40×12 (4×7 / 6×10 / 8×14),
+  switchable per window at runtime.
+
+Plus: 12 windows (`Ctrl+Alt+F1~F12`), scrollback & paging, toast notifications,
+two-stage Esc-hold exit, customizable splash and help text.
+
+![htop @ 80×24 (4×7 small font)](docs/img/0.4.2-htop-80x24.png)
 
 ## Hardware & system
 
@@ -126,10 +125,10 @@ Placeholders (replaced before tag parsing; unknown `<...>` kept as-is):
 The generated `config.ini` contains the built-in splash expressed with these tags,
 ready to edit.
 
-Small-font example (80×24, 4px ASCII): `font_size=4`; every window can switch sizes
-independently with `FN+U/I`. Font details: [docs/fonts.md](docs/fonts.md).
-**Full attribution, license texts and redistribution obligations for fonts and
-third-party assets: [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**.
+Every window can switch sizes independently with `FN+U/I`. Font details:
+[docs/fonts.md](docs/fonts.md). **Full attribution, license texts and redistribution
+obligations for fonts and third-party assets:
+[docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**.
 
 ## Build
 
@@ -182,7 +181,7 @@ subset / redrawn from the fonts below:
 | [ChillBitmap](https://github.com/Warren2060/ChillBitmap) 7px | 4×7 Unicode body | SIL OFL-1.1 (reserved name) + 7px terms | warren2060 / ChillType |
 | [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) 10px / 8px Monospaced | 6×10 / 4×7 / 8×14 fallback | SIL OFL-1.1 | TakWolf |
 | **WenQuanYi Bitmap Song 14px** | **8×14 Unicode/CJK body** | **GPL-2.0 + font exception** | [wenq.org](http://wenq.org/) / [SourceForge](https://sourceforge.net/projects/wqy/files/wqy-bitmapfont/) |
-| Hand-drawn ASCII (4×6) & Latin/CP437 symbols | 4×7 ASCII; 8×14 Latin | MIT (with the project) | cardterm author |
+| Hand-drawn ASCII (4×6) & Latin/CP437 symbols | 4×7 ASCII; 8×14 Latin | MIT (with the project) | Hand-drawn by fsender |
 
 **Redistribution obligations (summary)** — full copyright lines, per-item URLs and duties
 in **[docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**:
@@ -203,3 +202,7 @@ in **[docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**:
 
 LovyanGFX, Adafruit GFX, BoutiqueBitmap9x9, ChillBitmap, Fusion Pixel, WenQuanYi —
 their authors and maintainers — and the M5Stack CardputerZero docs & community.
+
+---
+
+*Parts of the code in this project were generated with AI assistance.*
