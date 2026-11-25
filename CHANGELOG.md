@@ -3,6 +3,22 @@
 cardterm 版本变更记录（格式参考 Keep a Changelog）。
 版本号语义：0.x 阶段按需递增，破坏性/重要变更记入对应版本小节。
 
+## [1.0.1] - 2026-11-25
+
+### 变更
+
+- **遵循 APPLaunch 开发规范**：设备不再写死——fb / 键盘 / 键映射改由
+  `APPLAUNCH_LINUX_FBDEV_DEVICE`、`APPLAUNCH_LINUX_KEYBOARD_DEVICE`、
+  `APPLAUNCH_LINUX_KEYBOARD_MAP` 环境变量注入（回退板载默认值）；托管模式下
+  生命周期交还启动器（不 SIGSTOP、主键盘不 EVIOCGRAB），长按 ESC 由启动器
+  SIGTERM→SIGKILL 兜底，卡死也能强制退出。SSH 直跑的防御模式行为不变。
+- **商店上架文案更新**：突出多终端窗口、更快更省内存、壁纸配色定制、现代终端
+  协议、USB/蓝牙键盘支持，与系统自带 CLI 差异化定位。
+- **帮助页改为内置固定内容**：移除 `[text] help=` 自定义（帮助页统一为内置排版，
+  含署名与项目链接）；开屏页 `[text] splash=` 自定义保留。排版微调：删除
+  `FN+U / FN+I` 行的终端尺寸附注（省一行），末尾提示符改为 `> `。
+- `Maintainer` 字段修正为 `fsender <f_ender@163.com>`。
+
 ## [1.0.0] - 2026-11-24
 
 首个正式版本。自 0.7.x 系列迭代打磨：

@@ -33,7 +33,7 @@ ANSI 16/256/truecolor, kitty keyboard protocol.
   switchable per window at runtime.
 
 Plus: 12 windows (`Ctrl+Alt+F1~F12`), scrollback & paging, toast notifications,
-two-stage Esc-hold exit, customizable splash and help text.
+two-stage Esc-hold exit, customizable splash text.
 
 ![htop @ 80×24 (4×7 small font)](docs/img/0.4.2-htop-80x24.png)
 
@@ -108,7 +108,6 @@ hold_ms=2000                 # keep a manual scroll position this long (ms) befo
 
 [text]
 splash=                      # splash text (empty = show nothing; syntax below)
-help=                        # help page text (empty = built-in page; '>' appended)
 ```
 
 Startup: with `launch` set, cardterm runs it automatically; the startup screen matches

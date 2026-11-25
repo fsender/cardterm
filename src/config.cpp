@@ -13,7 +13,7 @@ namespace cfg {
 namespace {
 
 // 默认配置模板：每一项上方都有 1-2 行英文说明（取值/默认值/作用），面向全球用户。
-// 保持与 load() 的解析逻辑兼容；新增键（toast / splash / help）也在模板中给出示例。
+// 保持与 load() 的解析逻辑兼容；新增键（toast / splash）也在模板中给出示例。
 const char* kDefaultIni =
     "# cardterm configuration file (INI).\n"
     "# Lines starting with '#' or ';' are comments; unknown keys are ignored.\n"
@@ -103,10 +103,7 @@ const char* kDefaultIni =
     "#   <pty_id>              = window identifier, e.g. \"PTY 01\" (1-based, two digits)\n"
     "#   <version>             = program version, e.g. \"1.0.0\" (no 'v' prefix)\n"
     "#   <term_size_font_size> = grid + cell size as one string, e.g. \"53x17 cells, 6x10px\"\n"
-    "splash=<fgcolor=80c8ff>cardterm</fgcolor> <fgcolor=a0a0a0>v<version> terminal emulator</fgcolor> <fgcolor=ffffff><pty_id></fgcolor><br>  Window size: <term_size_font_size><br>  fg16 <fgcolor=212421>##</fgcolor><fgcolor=F7285A>##</fgcolor><fgcolor=42B610>##</fgcolor><fgcolor=E7C700>##</fgcolor><fgcolor=21AED6>##</fgcolor><fgcolor=F7AEFF>##</fgcolor><fgcolor=10C39C>##</fgcolor><fgcolor=E7E7E7>##</fgcolor> <fgcolor=636163>##</fgcolor><fgcolor=FF4D52>##</fgcolor><fgcolor=31D752>##</fgcolor><fgcolor=EFEB31>##</fgcolor><fgcolor=5AC7FF>##</fgcolor><fgcolor=FFAAF7>##</fgcolor><fgcolor=21DFC6>##</fgcolor><fgcolor=FFFFFF>##</fgcolor><br>  bg16 <bgcolor=212421>  </bgcolor><bgcolor=F7285A>  </bgcolor><bgcolor=42B610>  </bgcolor><bgcolor=E7C700>  </bgcolor><bgcolor=21AED6>  </bgcolor><bgcolor=F7AEFF>  </bgcolor><bgcolor=10C39C>  </bgcolor><bgcolor=E7E7E7>  </bgcolor> <bgcolor=636163>  </bgcolor><bgcolor=FF4D52>  </bgcolor><bgcolor=31D752>  </bgcolor><bgcolor=EFEB31>  </bgcolor><bgcolor=5AC7FF>  </bgcolor><bgcolor=FFAAF7>  </bgcolor><bgcolor=21DFC6>  </bgcolor><bgcolor=FFFFFF>  </bgcolor><br>  RGB  <bgcolor=DC2828>  </bgcolor><bgcolor=28B450>  </bgcolor><bgcolor=325ADC>  </bgcolor><bgcolor=F0C828>  </bgcolor> <fgcolor=FF0000>TUI</fgcolor> <fgcolor=00FF00>CLI</fgcolor> <fgcolor=0000FF>colors</fgcolor><br>  Enter command (bash/ssh/codex...)<br>  to run it in this terminal.<br>  FN+W / FN+E: switch terminal window.<br>  Hold ESC for 2s: kill all and close.<br>  Type <fgcolor=F0C828>\"help\"</fgcolor> for more information.<br>\n"
-    "# Custom help page text, shown by the \"help\" command (same tags as splash).\n"
-    "# Empty = built-in help page; the launcher prompt line is appended after it.\n"
-    "help=\n";
+    "splash=<fgcolor=80c8ff>cardterm</fgcolor> <fgcolor=a0a0a0>v<version> terminal emulator</fgcolor> <fgcolor=ffffff><pty_id></fgcolor><br>  Window size: <term_size_font_size><br>  fg16 <fgcolor=212421>##</fgcolor><fgcolor=F7285A>##</fgcolor><fgcolor=42B610>##</fgcolor><fgcolor=E7C700>##</fgcolor><fgcolor=21AED6>##</fgcolor><fgcolor=F7AEFF>##</fgcolor><fgcolor=10C39C>##</fgcolor><fgcolor=E7E7E7>##</fgcolor> <fgcolor=636163>##</fgcolor><fgcolor=FF4D52>##</fgcolor><fgcolor=31D752>##</fgcolor><fgcolor=EFEB31>##</fgcolor><fgcolor=5AC7FF>##</fgcolor><fgcolor=FFAAF7>##</fgcolor><fgcolor=21DFC6>##</fgcolor><fgcolor=FFFFFF>##</fgcolor><br>  bg16 <bgcolor=212421>  </bgcolor><bgcolor=F7285A>  </bgcolor><bgcolor=42B610>  </bgcolor><bgcolor=E7C700>  </bgcolor><bgcolor=21AED6>  </bgcolor><bgcolor=F7AEFF>  </bgcolor><bgcolor=10C39C>  </bgcolor><bgcolor=E7E7E7>  </bgcolor> <bgcolor=636163>  </bgcolor><bgcolor=FF4D52>  </bgcolor><bgcolor=31D752>  </bgcolor><bgcolor=EFEB31>  </bgcolor><bgcolor=5AC7FF>  </bgcolor><bgcolor=FFAAF7>  </bgcolor><bgcolor=21DFC6>  </bgcolor><bgcolor=FFFFFF>  </bgcolor><br>  RGB  <bgcolor=DC2828>  </bgcolor><bgcolor=28B450>  </bgcolor><bgcolor=325ADC>  </bgcolor><bgcolor=F0C828>  </bgcolor> <fgcolor=FF0000>TUI</fgcolor> <fgcolor=00FF00>CLI</fgcolor> <fgcolor=0000FF>colors</fgcolor><br>  Enter command (bash/ssh/codex...)<br>  to run it in this terminal.<br>  FN+W / FN+E: switch terminal window.<br>  Hold ESC for 2s: kill all and close.<br>  Type <fgcolor=F0C828>\"help\"</fgcolor> for more information.<br>\n";
 
 void trim(char* s)
 {
@@ -138,7 +135,7 @@ std::string config_path()
 
 }  // namespace
 
-// 最近一次 load() 得到的配置（供 session 读取 splash/help/launch/toast）。
+// 最近一次 load() 得到的配置（供 session 读取 splash/launch/toast）。
 const Config& current() { return g_last; }
 
 // 最近一次 load() 是否新建了默认配置文件（= 本次运行是首次运行）。
@@ -185,7 +182,7 @@ bool load(Config& out)
     if (!has_bom) f.seekg(0);              // 无 BOM：回到文件开头
   }
 
-  char line[4096];                       // [text] splash/help 可能较长，放宽行/值缓冲
+  char line[4096];                       // [text] splash 可能较长，放宽行/值缓冲
   char section[64] = "";
   while (f.getline(line, sizeof(line))) {
     trim(line);
@@ -268,12 +265,11 @@ bool load(Config& out)
           out.view_hold_ms = n;
         }
       }
-    } else if (!strcmp(section, "text")) {             // 开屏/帮助页自定义文本
+    } else if (!strcmp(section, "text")) {             // 开屏页自定义文本
       if (!strcmp(key, "splash")) out.splash = val;
-      else if (!strcmp(key, "help")) out.help = val;
     }
   }
-  g_last = out;                          // 供 session::run 读取（splash/help/launch/toast）
+  g_last = out;                          // 供 session::run 读取（splash/launch/toast）
   return true;
 }
 

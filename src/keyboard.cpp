@@ -31,6 +31,7 @@
 //     调用方弹 toast），按住 2s → Quit；中途松开不产生任何事件（提示由调用方自然
 //     消失）；短按（<0.5s）按/松成对上报，回显 "Esc"
 #include "keyboard.h"
+#include "applaunch_env.h"
 
 #include <atomic>
 #include <cctype>
@@ -106,12 +107,70 @@ const DMap kDigits[] = {
 
 // ── 符号层（DT linux,keymap1）重定义键码 ───────────────────────────
 // 语义来源：/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map
+// （APPLaunch 经 APPLAUNCH_LINUX_KEYBOARD_MAP 注入同一文件；运行期优先用
+//   注入的 map，缺失/解析失败时静默回退本内置表，见 load_keymap()/sym_char()）
 const Map kSymbols[] = {
   {26,"!"},{27,"@"},{39,"#"},{40,"$"},{41,"%"},{43,"^"},{51,"&"},{52,"*"},
   {53,"("},{94,")"},{55,"~"},{69,"`"},{70,"_"},{71,"-"},{72,"+"},{73,"="},
   {74,"["},{75,"]"},{76,"{"},{77,"}"},{79,";"},{80,":"},{81,"'"},{82,"\""},
   {83,"<"},{85,">"},{86,"\\"},{89,"|"},{90,","},{91,"."},{92,"/"},{93,"?"},
 };
+
+// ── APPLaUNCH_LINUX_KEYBOARD_MAP 运行期覆盖表 ─────────────────────
+// loadkeys 格式（"keycode 26 = exclam"）解析为 键码→字符；查表优先于
+// kSymbols。仅覆盖符号层（字符均为单字符），不触碰字母/数字/控制键。
+struct SymEnt { uint16_t code; char ch; };
+SymEnt g_sym_map[96];
+int    g_sym_n = 0;
+
+char keysym_to_char(const char* name)
+{
+  if (name[0] != '\0' && name[1] == '\0') return name[0];  // 单字符 keysym
+  struct N { const char* name; char ch; };
+  static const N tbl[] = {
+    {"exclam",'!'},{"at",'@'},{"numbersign",'#'},{"dollar",'$'},{"percent",'%'},
+    {"asciicircum",'^'},{"ampersand",'&'},{"asterisk",'*'},{"parenleft",'('},
+    {"parenright",')'},{"asciitilde",'~'},{"grave",'`'},{"underscore",'_'},
+    {"minus",'-'},{"plus",'+'},{"equal",'='},{"bracketleft",'['},{"bracketright",']'},
+    {"braceleft",'{'},{"braceright",'}'},{"semicolon",';'},{"colon",':'},
+    {"apostrophe",'\''},{"quotedbl",'"'},{"less",'<'},{"greater",'>'},
+    {"backslash",'\\'},{"bar",'|'},{"comma",','},{"period",'.'},{"slash",'/'},
+    {"question",'?'},{"space",' '},
+    {"zero",'0'},{"one",'1'},{"two",'2'},{"three",'3'},{"four",'4'},
+    {"five",'5'},{"six",'6'},{"seven",'7'},{"eight",'8'},{"nine",'9'},
+  };
+  for (const auto& t : tbl) if (strcmp(t.name, name) == 0) return t.ch;
+  return 0;
+}
+
+void load_keymap(const char* path)
+{
+  FILE* f = fopen(path, "r");
+  if (!f) {
+    fprintf(stderr, "[kbd] keymap %s -> %s (builtin fallback)\n", path, strerror(errno));
+    return;
+  }
+  char line[256];
+  while (fgets(line, sizeof line, f))
+  {
+    char* c = strchr(line, '#'); if (c) *c = 0;           // 行注释
+    unsigned code; char name[64];
+    if (sscanf(line, " keycode %u = %63s", &code, name) != 2) continue;
+    char ch = keysym_to_char(name);
+    if (ch == 0 || g_sym_n >= (int)(sizeof g_sym_map / sizeof g_sym_map[0])) continue;
+    g_sym_map[g_sym_n++] = { (uint16_t)code, ch };
+  }
+  fclose(f);
+  fprintf(stderr, "[kbd] keymap %s: %d entries loaded\n", path, g_sym_n);
+}
+
+// 符号层键码 → 字符；0 = 非符号层键。注入 map 优先，内置表兜底。
+char sym_char(uint16_t code)
+{
+  for (int i = 0; i < g_sym_n; i++) if (g_sym_map[i].code == code) return g_sym_map[i].ch;
+  for (const auto& m : kSymbols) if (m.code == code) return m.text[0];
+  return 0;
+}
 
 // ── 控制键回显名（Fn 层 keymap2 + 基础层特殊键）───────────────────
 const Map kControls[] = {
@@ -172,10 +231,10 @@ std::string std_translate(uint16_t code, bool shift)
   return std::string();
 }
 
-// 键码 → 回显文本。顺序：符号层表优先 → 字母 → 数字行 → 控制键名 → 诊断。
+// 键码 → 回显文本。顺序：符号层表优先（注入 map → 内置）→ 字母 → 数字行 → 控制键名 → 诊断。
 std::string translate(uint16_t code, bool shift)
 {
-  for (const auto& m : kSymbols) if (m.code == code) return m.text;
+  if (char c = sym_char(code)) return std::string(1, c);
 
   for (const auto& m : kLetters) {
     if (m.code != code) continue;
@@ -765,7 +824,7 @@ bool trans_pair(uint16_t code, char* lo, char* up)
 {
   for (const auto& m : kLetters) if (m.code == code) { *lo = m.lo; *up = m.up; return true; }
   for (const auto& m : kDigits)  if (m.code == code) { *lo = m.lo; *up = m.up; return true; }
-  for (const auto& m : kSymbols) if (m.code == code) { *lo = m.text[0]; *up = m.text[0]; return true; }
+  if (char c = sym_char(code)) { *lo = c; *up = c; return true; }
   if (code == KEY_SPACE) { *lo = ' '; *up = ' '; return true; }
   return false;
 }
@@ -1183,8 +1242,10 @@ void open_mod_source()
   g_mod_src = ModSrc::None;                 // 无状态源：三键退化为普通按键（不回显）
 }
 
-// 打开主设备（板载或 CARDTERM_KBD 指定的设备）。失败返回 false 且不改变 g_primary。
-// grab_required=true 时 EVIOCGRAB 失败即放弃（主键盘路径的旧语义）。
+// 打开主设备（CARDTERM_KBD / APPLaunch 注入 / 板载默认路径）。失败返回 false
+// 且不改变 g_primary。grab_required=true 时 EVIOCGRAB 失败即放弃（主键盘路径
+// 的旧语义）；托管模式（APPLaunch 协作启动）下不独占：启动器靠共享 evdev fd
+// 监视 ESC 长按做 SIGTERM→SIGKILL 兜底，EVIOCGRAB 会掐死这条兜底链。
 bool open_primary(const char* path, bool explicit_env)
 {
   int fd = ::open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -1200,7 +1261,8 @@ bool open_primary(const char* path, bool explicit_env)
   dev_identity(fd, &bustype, &name);          // 失败不致命：未知设备按板载旧语义
   const bool standard = primary_is_standard(bustype, name, explicit_env);
 
-  if (ioctl(fd, EVIOCGRAB, 1) < 0) {          // 独占：按键不泄漏给控制台/其他进程
+  const bool coop = applaunch_env::coop_managed();
+  if (!coop && ioctl(fd, EVIOCGRAB, 1) < 0) {  // 独占：按键不泄漏给控制台/其他进程
     fprintf(stderr, "[kbd] EVIOCGRAB %s -> %s\n", path, strerror(errno));
     ::close(fd);
     return false;
@@ -1213,9 +1275,9 @@ bool open_primary(const char* path, bool explicit_env)
   g_primary.bustype  = bustype;
   g_primary.standard = standard;
   g_primary.rdev     = st.st_rdev;
-  fprintf(stderr, "[kbd] open %s -> ok%s (bustype=0x%02x name=%s layout=%s)\n",
+  fprintf(stderr, "[kbd] open %s -> ok%s (bustype=0x%02x name=%s layout=%s%s)\n",
           path, explicit_env ? "" : " (auto)", (unsigned)bustype, name.c_str(),
-          standard ? "standard-US" : "onboard");
+          standard ? "standard-US" : "onboard", coop ? ", shared" : "");
   return true;
 }
 
@@ -1224,8 +1286,17 @@ bool open_primary(const char* path, bool explicit_env)
 bool open()
 {
   if (g_primary.fd >= 0) return true;
+
+  // APPLaunch 注入的键映射（loadkeys 格式）优先于内置符号表；未注入/解析
+  // 失败时保持内置表语义（见 sym_char()）。
+  if (const char* km = applaunch_env::keyboard_map_path()) load_keymap(km);
+
   const char* env = std::getenv("CARDTERM_KBD");
-  const char* paths[2] = {
+  // 主设备查找链：CARDTERM_KBD（测试注入，严格）→ APPLAUNCH 注入节点
+  //   → /dev/input/cardputer-zero-internal → by-path 板载默认。
+  const char* applaunch_dev = applaunch_env::keyboard_device_hint();
+  const char* paths[3] = {
+    applaunch_dev,
     "/dev/input/cardputer-zero-internal",
     "/dev/input/by-path/platform-3f804000.i2c-event",
   };
@@ -1233,7 +1304,8 @@ bool open()
     // 显式指定设备：严格模式，不静默回退
     if (!open_primary(env, /*explicit_env=*/true)) return false;
   } else {
-    for (int i = 0; i < 2 && g_primary.fd < 0; i++) open_primary(paths[i], false);
+    for (int i = 0; i < 3 && g_primary.fd < 0; i++)
+      if (paths[i] != nullptr) open_primary(paths[i], false);
   }
   if (g_primary.fd < 0) { fprintf(stderr, "[kbd] no device\n"); return false; }
 

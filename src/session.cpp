@@ -494,7 +494,7 @@ bool g_out_pending = false;         // 有出站队列未排空（主循环据�
 bool g_out_progress = false;        // 上一轮出站排空确有字节写出（无进展 = 内核缓冲满）
 
 // ── 配置快照（ui.cpp 已 load 过一次；这里取 cfg::current() 的副本）────
-//   用于 [text] splash/help 自定义文本与 [general] launch 的启动程序名。
+//   用于 [text] splash 自定义文本与 [general] launch 的启动程序名。
 cfg::Config g_conf;
 std::string g_prompt_cmd = "bash";               // 启动器提示行：launch 第一个词（默认 bash）
 std::vector<std::string> g_default_cmd{"bash"};  // 启动器空回车运行的命令（launch 分词）
@@ -704,19 +704,15 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
     }
   }
   term::write("\033[2J\033[H");
-  if (!g_conf.help.empty()) {       // [text] help：自定义富文本替换内置帮助页
-    emit_rich_text(g_conf.help, true);
-    // 末尾仍输出空行 + regular7（SGR 37 = 调色板第 7 色）的 '>'
-    term::write("\r\n\033[37m>\033[0m");
-    return;
-  }
-  // 新帮助页：第一行/末尾 '>' 蓝色，快捷键列黄色，说明列默认灰
+  // 帮助页为内置固定内容（不再支持自定义；开屏页 [text] splash 仍可自定义）。
+  // 第一行/末尾 '>' 蓝色，快捷键列黄色，说明列默认灰
   const char* kBlue   = "\033[38;2;80;200;255m";
   const char* kYellow = "\033[38;2;231;199;0m";
   const char* kGray   = "\033[38;2;160;160;160m";
+  const char* kWhite  = "\033[38;2;255;255;255m";
   const char* kReset  = "\033[0m";
   std::string h;
-  h += kBlue; h += "  cardterm v" CARDTERM_VERSION " help"; h += kReset; h += "\r\n\r\n";
+  h += kBlue; h += "  cardterm v" CARDTERM_VERSION " help"; h += kReset; h += "\r\n";
   // 左列 19 字符定宽（与帮助页排版一致），右列为说明文字
   auto line = [&](const char* key, const char* desc) {
     h += kYellow; h += key;
@@ -728,8 +724,7 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   line("Ctrl+Alt+F1~F12    ", "Switch terminal window");
   line("FN+Q               ", "Kill and close current window");
   line("FN+W / FN+E        ", "Previous / Next terminal window");
-  line("FN+U / FN+I        ", "Zoom out / Zoom in ( terminal");
-  line("                   ", "size: 80*24 / 53*17 / 40*12 )");
+  line("FN+U / FN+I        ", "Zoom out / Zoom in");
   line("Hold ESC for 2s    ", "Kill, close all window and exit");
   // 配置文件提示（文件名亮绿色，其余默认颜色）
   h += "\r\n";
@@ -738,8 +733,14 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   h += "\033[38;2;80;255;80m"; h += "~/.config/cardterm/config.ini";   // 亮绿色文件名
   h += kReset; h += " file to edit\r\n";
   h += "settings and configurations.\r\n";
+  // 署名两行：人名白色 (FFFFFF)，URL 与标题同 kBlue (#50C8FF)
+  h += "Created by ";
+  h += kWhite; h += "FriendshipEnder (GitHub: fsender)";
+  h += kReset; h += ". Visit\r\n";
+  h += kBlue; h += "https://github.com/fsender/cardterm";
+  h += kReset; h += " for more info.\r\n";
   h += "\r\n";
-  h += kBlue; h += ">"; h += kReset;
+  h += kBlue; h += "> "; h += kReset;
   term::write(h.c_str(), h.size());
 }
 

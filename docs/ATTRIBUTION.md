@@ -244,8 +244,8 @@ cardterm 自己的 `copyright` 文件；另外字体源文件/生成脚本本身
 | `packaging/build-deb.sh`（注释 L42） | “两套点阵字体均为 OFL/公版，随包分发需附原文” | 三套；8×14 为 GPL-2.0 字体数据，另需 GPL 文本与源码提供方式 |
 
 > 这些是**发布前必须修**的文档级问题（P1），建议由项目所有者或打包/文档维护者后续处理。
-> 另：`packaging/control.in` 的 `Maintainer: me <me@localhost>`、
-> `Homepage: https://www.m5stack.com` 也是占位值，开源发布前应替换为真实项目联系人与主页。
+> 另：`packaging/control.in` 的 `Maintainer` 已修正为 `fsender <f_ender@163.com>`；
+> `Homepage: https://www.m5stack.com` 仍是占位值，开源发布前应替换为真实项目主页。
 
 ---
 

@@ -42,8 +42,11 @@ struct KeyEvent {
 };
 
 // 打开键盘并独占。主设备查找顺序：
-//   环境变量 CARDTERM_KBD（测试注入用）→ /dev/input/cardputer-zero-internal
+//   环境变量 CARDTERM_KBD（测试注入用）→ APPLAUNCH_LINUX_KEYBOARD_DEVICE
+//   （APPLaunch 注入，见 applaunch_env.h）→ /dev/input/cardputer-zero-internal
 //   → /dev/input/by-path/platform-3f804000.i2c-event
+// 托管模式（APPLaunch 协作启动）下主设备不 EVIOCGRAB：启动器靠共享 evdev fd
+// 监视 ESC 长按做 SIGTERM→SIGKILL 兜底；外接键盘仍独占（启动器不监视它们）。
 // 主设备打开后还会枚举 /dev/input/event*，把 USB/蓝牙外接键盘（有字母键）一并
 // 打开：板载键码走板载布局，外接键码走标准 US 布局，修饰键状态按设备独立跟踪。
 // 运行期每 ~1.8s 重扫一次 /dev/input 实现热插拔；外接设备掉线只移除该设备。

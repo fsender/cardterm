@@ -2,18 +2,21 @@
 //
 // 界面代码请写在 ui.cpp（契约见 ui.h）。
 // 本文件负责其余一切：
-//   - 创建绘图对象 tft（板载 /dev/fb0，320x170 ST7789v3）
-//   - 独占显示会话（冻结启动器、静默控制台、独占键盘、画面快照/还原）
+//   - 创建绘图对象 tft（fb 设备路径由 APPLaunch 环境变量注入，见 applaunch_env.h）
+//   - 独占显示会话（静默控制台、独占键盘、画面快照/还原；托管模式下生命周期
+//     交还 APPLaunch，见 exclusive_display.h）
 //   - 显示时长与退出收尾
 #define LGFX_USE_V1
 #include "ui.h"
+#include "applaunch_env.h"
 #include "exclusive_display.h"
 
 #include <string>
 #include <vector>
 
-// 板载 1.9" ST7789v3 面板（UI 经 ui.h 的 extern tft 使用）
-LGFX tft(320, 170, "/dev/fb0");
+// 板载 1.9" ST7789v3 面板（UI 经 ui.h 的 extern tft 使用）。
+// fb 设备不写死：APPLAUNCH_LINUX_FBDEV_DEVICE 注入优先，回退板载 /dev/fb0。
+LGFX tft(320, 170, applaunch_env::fbdev_path());
 
 static const unsigned long SHOW_MS = 5000;   // UI 显示时长（取消下方注释即恢复保持）
 

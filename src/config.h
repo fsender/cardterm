@@ -25,7 +25,6 @@
 //
 //   [text]
 //   splash=                     # 开屏文本（空 = 内置默认；颜色标签语法见 session.cpp）
-//   help=                       # 帮助页文本（空 = 内置默认帮助页）
 #pragma once
 
 #include <cstdint>
@@ -61,19 +60,18 @@ struct Config {
                                     //   范围 200–60000，超出钳位）
   int         font_size = 6;        // 初始字号：4 = 4x7，6 = 6x10（默认），8 = 8x14
                                     //   （每个窗口都可用 FN+U/I 单独调整）
-  // 开屏/帮助页自定义文本（[text] splash / [text] help）：
+  // 开屏页自定义文本（[text] splash）：
   //   空 = 用内置默认内容。语法只解析颜色标签，见 session.cpp emit_rich_text：
   //   <br> 换行；<fgcolor=RRGGBB>…</fgcolor>；<bgcolor=RRGGBB>…</bgcolor>；
   //   未闭合的颜色标签生效到末尾；不合法的标签原样显示。
   std::string splash;
-  std::string help;
 };
 
 // 读取 ~/.config/cardterm/config.ini；文件不存在时写入默认样例。
 // 解析失败的项保持默认值。返回是否读到已有文件（false = 用了默认并创建）。
 bool load(Config& out);
 
-// 最近一次 load() 成功解析的配置（session 读 splash/help/launch/toast 用）
+// 最近一次 load() 成功解析的配置（session 读 splash/launch/toast 用）
 const Config& current();
 
 // 最近一次 load() 是否因配置文件不存在而新建了默认模板（= 首次运行）

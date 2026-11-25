@@ -1,5 +1,6 @@
 // exclusive_display.cpp — see exclusive_display.h for the contract.
 #include "exclusive_display.h"
+#include "applaunch_env.h"
 
 #include <fcntl.h>
 #include <linux/fb.h>
@@ -92,8 +93,9 @@ void vt_text()
 
 bool fb_backup()
 {
-  g_fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
-  if (g_fb_fd < 0) { perror("open /dev/fb0"); return false; }
+  const char* fbdev = applaunch_env::fbdev_path();
+  g_fb_fd = open(fbdev, O_RDWR | O_CLOEXEC);
+  if (g_fb_fd < 0) { perror(fbdev); return false; }
 
   fb_fix_screeninfo fix{};
   fb_var_screeninfo var{};
@@ -109,8 +111,8 @@ bool fb_backup()
 
   g_fb_backup.resize(g_fb_len);
   memcpy(g_fb_backup.data(), g_fb_map, g_fb_len);
-  fprintf(stderr, "[exclusive] fb0: %ux%u %u bpp, %zu bytes mapped\n",
-          var.xres, var.yres, var.bits_per_pixel, g_fb_len);
+  fprintf(stderr, "[exclusive] %s: %ux%u %u bpp, %zu bytes mapped\n",
+          fbdev, var.xres, var.yres, var.bits_per_pixel, g_fb_len);
   if (var.xres != 320 || var.yres != 170 || var.bits_per_pixel != 16)
     fprintf(stderr, "[exclusive] WARN: fb geometry %ux%u/%ubpp != expected 320x170/16bpp\n",
             var.xres, var.yres, var.bits_per_pixel);
@@ -200,10 +202,16 @@ std::vector<pid_t> find_applaunch_pids()
 
 // Freeze (never kill) the launcher so it keeps its exact runtime state and
 // resumes untouched after we leave — "exit returns it exactly as it was".
-// Always frozen, even when we were launched from it: its Terminal=true pages
-// keep redrawing the screen over our output unless stopped.
+// 只用于防御模式（SSH/直跑、启动器 Terminal=true 页）。托管模式下必须跳过：
+// cp0_process_exec_blocking 已协作暂停启动器 LVGL/键盘线程，且其 ESC 长按
+// SIGTERM→SIGKILL 兜底监视线程必须活着——SIGSTOP 会冻结它，兜底即失效。
 void freeze_applaunch()
 {
+  if (applaunch_env::coop_managed())
+  {
+    fprintf(stderr, "[exclusive] APPLaunch-managed mode: launcher keeps running (ESC kill fallback live)\n");
+    return;
+  }
   for (pid_t p : find_applaunch_pids())
   {
     if (kill(p, SIGSTOP) == 0)
