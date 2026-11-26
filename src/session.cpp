@@ -1223,24 +1223,33 @@ bool attach_parked(int n)
   use_win(n);
   term::reset_cursor_style();
   if (!tk.hist.empty()) term::write(tk.hist.data(), tk.hist.size());   // 贴回历史文本
+  // PTY 尺寸必须同步到【当前窗口的网格】，而不是剥离时的旧尺寸：若剥离时是
+  // 40×12、恢复到 53×17 窗口却把 PTY 设回 40×12，程序仍按 40 列折行/重绘，
+  // readline 会覆盖行首（实测 bug：输入到第 40 列不换行而是压掉提示符）。
   struct winsize ws;
   memset(&ws, 0, sizeof ws);
-  ws.ws_col = tk.cols > 0 ? tk.cols : 53;
-  ws.ws_row = tk.rows > 0 ? tk.rows : 17;
-  // 恢复前后 PTY 尺寸相同 → 内核 pty_resize 判定无变化 → 不发 SIGWINCH，
-  // TUI（nano/htop 等）不会重新布局。先设一个"±1 行"的过渡尺寸，**留出处理
-  // 间隔**（两次 ioctl 之间若无间隔，SIGWINCH 会被应用合并处理，采样时尺寸
-  // 已还原 → ncurses 判定无变化、只做差异重绘 → 界面残缺），再设真实尺寸：
-  // 两次各触发一次全量重绘，最终画面正确。
-  {
+  ws.ws_col = term::kCols;
+  ws.ws_row = term::kRows;
+  ws.ws_xpixel = term::kCols * term::kCellW;
+  ws.ws_ypixel = term::kRows * term::kCellH;
+  const bool size_same = (tk.cols == ws.ws_col && tk.rows == ws.ws_row);
+  if (!size_same) {
+    // 尺寸真实变化 → 内核 pty_resize 判定变化并连发 SIGWINCH → TUI 全量重绘
+    ioctl(w.master, TIOCSWINSZ, &ws);
+  } else {
+    // 恢复前后 PTY 尺寸相同 → 内核判定无变化 → 不发 SIGWINCH，
+    // TUI（nano/htop 等）不会重新布局。先设一个"±1 行"的过渡尺寸，**留出处理
+    // 间隔**（两次 ioctl 之间若无间隔，SIGWINCH 会被应用合并处理，采样时尺寸
+    // 已还原 → ncurses 判定无变化、只做差异重绘 → 界面残缺），再设真实尺寸：
+    // 两次各触发一次全量重绘，最终画面正确。
     struct winsize ws2;
     memset(&ws2, 0, sizeof ws2);
     ws2.ws_col = ws.ws_col;
     ws2.ws_row = ws.ws_row > 1 ? ws.ws_row - 1 : 2;
     ioctl(w.master, TIOCSWINSZ, &ws2);
     usleep(150000);                 // 等 TUI 处理第一个 SIGWINCH 并全量重绘
+    ioctl(w.master, TIOCSWINSZ, &ws);
   }
-  ioctl(w.master, TIOCSWINSZ, &ws);
   // Q3/Q4：附着后发送"重绘命令"（Ctrl+L = 0x0C，nano/less/vim/多数 TUI 的
   // 强制重绘键）触发程序重新绘制；bash 等会清屏重显提示符，历史仍在滚动区。
   feed_key(w, "\f", 1);
