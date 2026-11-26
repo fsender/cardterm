@@ -143,3 +143,45 @@ launcher 把 `ExecBlocking` 改为可挂起的进程管理 + 首页"运行中应
 **launcher 只读副本**：`ext_components/cp0_lvgl/src/cp0/cp0_external_app_runner.cpp`（阻塞循环+killpg）、`cp0_external_process_group.hpp`（subreaper/waitpid(-pgid)）、grep 全目录无 `SIGCHLD`；`projects/APPLaunch/main/ui/launch.cpp`（ExecBlocking）；`projects/AppStore/main/backend/appstore_native.cpp:1939-1949`（apt-get 依赖解析）。
 
 **设备（adb 只读，serial CardputerZero-b46fe11c）**：`which/dpkg -l`（无 tmux）、`apt-cache policy tmux screen`、`systemctl --version`、`loginctl show-user me`（Linger=yes）、`ls /usr/lib/systemd/user/`、`free -m`、`ls /run/user/1000`、`cat cardterm.desktop`、`ps`（应用 uid=1000）。
+
+---
+
+## 8. 附：tmux 内存增量实测（2026-11-26）
+
+> 方法：设备只读取在跑进程的 `/proc/<pid>/smaps_rollup`（PSS/RSS）作基线；tmux 本体在**宿主机**用专用 socket 实测（tmux 3.4 / x86_64，`tmux new -d -x 53 -y 17` 同尺寸、`seq 1 2000` 填满默认 history-limit）。
+> x86_64 二进制通常略大于 arm64，下表可视为**轻微上界**。
+
+### 8.1 设备基线（只读，cardterm 正在运行）
+
+| 进程 | RSS | PSS |
+|---|---|---|
+| cardterm UI（pid 132501） | 5.3 MB | **2.1 MB** |
+| bash 窗口（pid 132504） | 5.7 MB | **3.7 MB** |
+| 系统可用内存 | — | **280 MB**（swap 另有 393 MB 空闲） |
+
+### 8.2 tmux 各组件实测（宿主机，PSS 口径）
+
+| 组成 | PSS | 说明 |
+|---|---|---|
+| tmux **server**（空闲，1 pane） | **≈1.8–2.2 MB** | RSS 4.6 MB（含共享库重复计数；PSS 已按比例分摊） |
+| tmux **client**（attach 中） | **≈1.4 MB** | RSS 5.2 MB；跑在 cardterm 现有 PTY 里，**不新增 shell** |
+| 每 pane 历史（默认 2000 行 × 53 列） | **≈0.4 MB** | server RSS 4.56→5.71 MB（3 pane 全满），约 0.38 MB/pane |
+| pane 里的 shell | 不变 | bash 无论哪条路径都要跑，**不算增量**（native 路径同样是 bash PSS 3.7 MB） |
+
+### 8.3 结论：相对 native（无 tmux）的净增量
+
+```
+增量 = client + server + 0.4MB × pane数
+```
+
+> 口径注：上式按"每窗 1 个 tmux client"计时，N 个 client 的共享页（同一二进制+libc/libevent/ncurses）在 PSS 里只摊一次，
+> 实际总增量 ≈ **client 私有部分×N（约 0.5MB/个）+ 共享 2MB + server 2MB + 历史 0.4MB×N**，12 窗最坏约 **10–11 MB**，仍在可忽略量级。
+
+| 场景 | 净增量（PSS） | 占 280MB 可用 |
+|---|---|---|
+| 1 窗、历史未满（典型启动） | **≈3.5 MB** | ~1.3% |
+| 3 窗、历史全满 | **≈4.5–5 MB** | ~1.7% |
+| 12 窗全开、历史全满（最坏） | **≈8 MB** | ~2.9% |
+
+**判定：增量可忽略**——典型场景约 3.5–5 MB，最坏 ≤8 MB；对比 280 MB 可用 + 393 MB swap 余量，以及单个 bash 就占 3.7 MB 的现实，tmux 路径（P1）的内存成本不构成风险。
+若要再压：`set -g history-limit 500` 可把每 pane 历史从 0.4 MB 降到 ~0.1 MB（12 窗最坏再省 ~3.6 MB），代价是 tmux 侧回看变短（cardterm 自身回滚缓冲不受影响）。

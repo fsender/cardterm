@@ -1,6 +1,7 @@
 // session.cpp — PTY 会话实现（见 session.h）
 #include "session.h"
 
+#include "bgtask.h"
 #include "config.h"
 #include "exclusive_display.h"
 #include "keyboard.h"
@@ -78,9 +79,14 @@ struct Win {
   OutQueue out_reply;               // 出站：终端应答流（可丢）
   pid_t fg_pgrp = 0;                // 上次观测到的 PTY 前台进程组（回到 shell = TUI 退出 → 复位光标呈现）
   bool  cursor_reset_pending = false;  // 后台窗口待复位（切到前台时再做，避免污染当前屏）
+  bool  adopted = false;            // 重附着接管的会话：child 非亲生（waitpid 不可用，
+                                    //   退出检测走 master EOF，补刀按 pgid）
 };
 
-Win g_wins[12];
+Win g_wins[32];
+int g_win_count = 12;             // 窗口槽位数（[general] windows，2–32，默认 12；
+                                  //   run() 里按配置赋值。上限 32：状态/回滚/出站队列
+                                  //   均按打开的窗口分配，预留槽位仅 ~1.7KB/个）
 
 int win_index(const Win& w) { return (int)(&w - g_wins); }
 
@@ -409,13 +415,11 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
     setenv("TERM", "xterm-256color", 1);
     setenv("COLORTERM", "truecolor", 1);
     setenv("TERM_PROGRAM", "cardterm", 1);
-    {
-      char b[16];
-      snprintf(b, sizeof b, "%d", term::kCols);
-      setenv("COLUMNS", b, 1);
-      snprintf(b, sizeof b, "%d", term::kRows);
-      setenv("LINES", b, 1);
-    }
+    // 注意：这里【不要】setenv COLUMNS/LINES。真实终端（xterm 等）都不导出它们；
+    // 一旦导出，ncurses 的尺寸判定会被 env 钉死在启动值（tinfo/lib_setup.c
+    // _nc_get_screensize：ioctl 之后 env 覆盖 *linep/*colp），导致 nano/htop 等
+    // ncurses 系 TUI 在 Fn+U/I 缩放后不重新布局（实测 A/B 已证）。程序要知道
+    // 尺寸请走 ioctl(TIOCGWINSZ) / terminfo，与主流终端行为一致。
 
     // Unicode 宣称：默认 UTF-8 locale；关闭时 LANG=C（TUI 程序改用 ACS 框线，
     // 不再发宽字符/生僻码点，规避字体覆盖与全半角差异）
@@ -722,12 +726,13 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   line("<command>          ", "Run interactive shell or app in");
   line("                   ", "this window (bash/ssh/codex...)");
   line("Ctrl+Alt+F1~F12    ", "Switch terminal window");
-  line("FN+Q               ", "Kill and close current window");
-  line("FN+W / FN+E        ", "Previous / Next terminal window");
-  line("FN+U / FN+I        ", "Zoom out / Zoom in");
+  line("Fn+Q               ", "Kill and close current window");
+  line("Fn+W / Fn+E        ", "Previous / Next terminal window");
+  line("Fn+U / Fn+I        ", "Zoom out / Zoom in");
+  line("Fn+A               ", "Detach terminal and move it to");
+  line("                   ", "background. Reopen to attach.");
   line("Hold ESC for 2s    ", "Kill, close all window and exit");
   // 配置文件提示（文件名亮绿色，其余默认颜色）
-  h += "\r\n";
   h += kReset;
   h += "Open ";
   h += "\033[38;2;80;255;80m"; h += "~/.config/cardterm/config.ini";   // 亮绿色文件名
@@ -744,7 +749,7 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   term::write(h.c_str(), h.size());
 }
 
-void launcher_show(int n)           // 初始界面（重建状态；切走即弃）
+void launcher_show(int n, bool show_banner = true)   // 初始界面（重建状态；切走即弃）
 {
   Win& w = g_wins[n];
   if (w.font_size < 0) w.font_size = g_opt.font_size;
@@ -758,7 +763,37 @@ void launcher_show(int n)           // 初始界面（重建状态；切走即�
   use_win(n);
   term::reset_cursor_style();         // 回到启动器：光标呈现恢复默认
   term::fill_bg();                    // 切窗：先填背景/背景图清屏，再显示新窗口内容（T=新状态后才有画布）
-  launcher_banner(n);
+  if (show_banner) launcher_banner(n);   // Fn+H 帮助路径：不显示 banner，直接写帮助
+  term::present();
+}
+
+// Fn+H / Super+H：切到下一个"空终端窗口"（无会话/程序、无后台会话的槽位）显示帮助
+// （等同在初始界面输入 help，不显示 banner）。当前窗口是唯一空窗时就地显示；
+// 所有窗口都有会话/程序时什么都不做。
+void switch_to(int n, bool toast, bool banner);   // 前置声明（定义见下）
+void show_help_in_empty_window()
+{
+  int target = -1;
+  for (int k = 1; k < g_win_count; k++) {
+    int i = (g_cur + k) % g_win_count;
+    // 空槽 = 无会话/程序、无后台会话、无死亡记录（死亡记录槽位不算空，会走 attach_dead）
+    if (!g_wins[i].open && !bgtask::session_exists(i + 1) && !bgtask::has_dead(i + 1)) {
+      target = i;
+      break;
+    }
+  }
+  if (target < 0) {
+    if (g_wins[g_cur].open) return;     // 全部窗口都有会话/程序：无动作
+    target = g_cur;                     // 当前即唯一空窗：就地显示帮助
+  }
+  if (target == g_cur) {
+    if (g_wins[g_cur].ts == nullptr) launcher_show(g_cur, false);
+    launcher_help();
+    term::present();
+    return;
+  }
+  switch_to(target, false, false);      // 不弹 toast、不显示 banner
+  launcher_help();
   term::present();
 }
 
@@ -932,7 +967,7 @@ bool pump_all()
   // （否则 `yes` 之类生产者的速度足以让内层循环不返回，键盘事件永远送不进去）
   const uint64_t t0 = now_ms();
   size_t budget = 128 * 1024;
-  for (int i = 0; i < 12 && budget > 0; i++) {
+  for (int i = 0; i < g_win_count && budget > 0; i++) {
     Win& w = g_wins[i];
     if (!w.open || w.eof) continue;
     for (;;) {
@@ -972,7 +1007,7 @@ void pump_out()
   bool progress = false;
   bool pending = false;
   for (int pass = 0; pass < 2 && budget > 0; pass++) {
-    for (int i = 0; i < 12 && budget > 0; i++) {
+    for (int i = 0; i < g_win_count && budget > 0; i++) {
       Win& w = g_wins[i];
       if (!w.open || w.master < 0) continue;
       OutQueue& q = (pass == 0) ? w.out_key : w.out_reply;
@@ -1062,6 +1097,8 @@ void close_current()                // FN+Q：关闭当前终端（类似关闭�
       if (w.child > 0 && waitpid(w.child, &w.status, WNOHANG) == 0) {
         kill(-w.child, SIGKILL);
         waitpid(w.child, &w.status, 0);
+      } else if (w.adopted && w.child > 0 && kill(-w.child, 0) == 0) {
+        kill(-w.child, SIGKILL);        // 附着会话：非亲生 waitpid 不可用，按 pgid 补刀
       }
     }
     if (w.master >= 0) close(w.master);
@@ -1073,8 +1110,8 @@ void close_current()                // FN+Q：关闭当前终端（类似关闭�
   g_master = -1;
 
   int nxt = -1;                     // 切到下一个仍开着的窗口
-  for (int k = 1; k < 12; k++) {
-    int i = (g_cur + k) % 12;
+  for (int k = 1; k < g_win_count; k++) {
+    int i = (g_cur + k) % g_win_count;
     if (g_wins[i].open) { nxt = i; break; }
   }
   if (nxt >= 0) {
@@ -1085,22 +1122,79 @@ void close_current()                // FN+Q：关闭当前终端（类似关闭�
     term::view_follow();
     term::invalidate();
     term::present();
+    if (was_open) {                  // 事件通知：仅真正关掉了会话窗口时弹
+      char tb[48];
+      snprintf(tb, sizeof tb, "PTY %02d closed. Now PTY %02d", closed_win + 1, g_cur + 1);
+      term::toast(tb);
+    }
   } else {
     // 没有其它打开的窗口：按"关闭最后一个标签页"语义退出程序（不回启动页）
+    if (was_open) {                  // req 3：全屏倒计时提示（复用 req 2 的提示框）
+      char tb[48];
+      snprintf(tb, sizeof tb, "PTY %02d closed.", closed_win + 1);
+      term::exit_prompt(tb);         // "No terminal running." + 3s→2s→1s
+    }
     g_quit_after_close = true;
-  }
-  if (was_open) {                    // 事件通知：仅真正关掉了会话窗口时弹
-    char tb[48];
-    if (nxt >= 0) snprintf(tb, sizeof tb, "PTY %02d closed. Now PTY %02d", closed_win + 1, g_cur + 1);
-    else          snprintf(tb, sizeof tb, "PTY %02d closed", closed_win + 1);
-    term::toast(tb);
   }
 }
 
 int first_open()
 {
-  for (int i = 0; i < 12; i++) if (g_wins[i].open) return i;
+  for (int i = 0; i < g_win_count; i++) if (g_wins[i].open) return i;
   return -1;
+}
+
+// Fn+A / Super+A：把当前窗口的会话剥离到后台（方案 P：master fd 移交守护进程，
+// 桥接进 tmux 会话 cardterm_PTY_NN），随后关闭窗口并释放其全部内存（req 4）。
+// 开屏/帮助界面（无 PTY）不响应。剥离后会话持续在后台运行（req 5）；
+// 是最后一个窗口时走全屏倒计时退出（req 2），会话不被杀（req 7）。
+void detach_current()
+{
+  Win& w = g_wins[g_cur];
+  if (!w.open || w.master < 0) return;      // 仅活跃终端窗口
+  const int slot1 = g_cur + 1;
+  struct winsize ws;
+  memset(&ws, 0, sizeof ws);
+  if (ioctl(w.master, TIOCGWINSZ, &ws) < 0 || ws.ws_col <= 0 || ws.ws_row <= 0) {
+    ws.ws_col = 53; ws.ws_row = 17;
+  }
+  int hist_lines = (g_conf.bg_buffer_kb * 1024) / ws.ws_col + 64;   // ≈buffer_kb 的行数
+  if (hist_lines < 64) hist_lines = 64;
+  if (!bgtask::park(slot1, w.master, w.child, w.child,
+                    ws.ws_col, ws.ws_row, hist_lines)) {
+    term::toast("Detach failed. Session kept in this window");
+    return;
+  }
+  // 交接成功：本窗口全部内存释放（term 状态/回滚/出站队列；req 4）
+  close(w.master); w.master = -1; g_master = -1;
+  w.open = false; w.eof = false; w.exec_failed = false; w.adopted = false;
+  w.child = 0; w.fg_pgrp = 0; w.cursor_reset_pending = false;
+  w.out_key.clear(); w.out_reply.clear();
+  if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
+  w.launcher = false; w.line.clear();
+
+  int nxt = -1;                     // 切到下一个仍开着的窗口（同 close_current 语义）
+  for (int k = 1; k < g_win_count; k++) {
+    int i = (g_cur + k) % g_win_count;
+    if (g_wins[i].open) { nxt = i; break; }
+  }
+  if (nxt >= 0) {
+    g_cur = nxt;
+    g_wins[nxt].launcher = false;
+    term::fill_bg();
+    use_win(nxt);
+    term::view_follow();
+    term::invalidate();
+    term::present();
+    char tb[64];
+    snprintf(tb, sizeof tb, "Detached PTY %02d. Now PTY %02d", slot1, g_cur + 1);
+    term::toast(tb);
+  } else {
+    char tb[48];
+    snprintf(tb, sizeof tb, "Detached PTY %02d.", slot1);
+    term::exit_prompt(tb);          // req 2：全屏倒计时 3s→2s→1s（会话保活）
+    g_quit_after_close = true;
+  }
 }
 
 int status_code(int st)
@@ -1108,9 +1202,88 @@ int status_code(int st)
   return WIFEXITED(st) ? WEXITSTATUS(st) : (WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 0);
 }
 
-void switch_to(int n)               // Ctrl+Alt+F1~F12 目标
+// 重附着：收回被剥离会话（req 6/7/8 共用）。贴回纯文本历史（≤buffer_kb，
+// 无颜色）→ 重建窗口状态 → TIOCSWINSZ（内核自动 SIGWINCH → 全屏 TUI 重绘）。
+// 成功后窗口成为 adopted（child 非亲生：退出检测走 master EOF）。
+bool attach_parked(int n)
 {
-  if (n < 0 || n > 11 || n == g_cur) return;
+  Win& w = g_wins[n];
+  bgtask::Takeover tk;
+  const size_t max_hist = (size_t)g_conf.bg_buffer_kb * 1024;
+  if (!bgtask::takeover(n + 1, max_hist, tk)) return false;
+  if (w.ts != nullptr) term::state_free(w.ts);
+  if (w.font_size < 0) w.font_size = g_opt.font_size;
+  w.ts = term::state_new(win_opt(w));
+  if (w.ts == nullptr) { close(tk.master); return false; }
+  w.open = true; w.eof = false; w.exec_failed = false; w.launcher = false;
+  w.master = tk.master; w.child = tk.child; w.adopted = true;
+  w.fg_pgrp = 0; w.cursor_reset_pending = false; w.line.clear();
+  w.out_key.clear(); w.out_reply.clear();
+  g_cur = n;
+  use_win(n);
+  term::reset_cursor_style();
+  if (!tk.hist.empty()) term::write(tk.hist.data(), tk.hist.size());   // 贴回历史文本
+  struct winsize ws;
+  memset(&ws, 0, sizeof ws);
+  ws.ws_col = tk.cols > 0 ? tk.cols : 53;
+  ws.ws_row = tk.rows > 0 ? tk.rows : 17;
+  // 恢复前后 PTY 尺寸相同 → 内核 pty_resize 判定无变化 → 不发 SIGWINCH，
+  // TUI（nano/htop 等）不会重新布局。先设一个"±1 行"的过渡尺寸，**留出处理
+  // 间隔**（两次 ioctl 之间若无间隔，SIGWINCH 会被应用合并处理，采样时尺寸
+  // 已还原 → ncurses 判定无变化、只做差异重绘 → 界面残缺），再设真实尺寸：
+  // 两次各触发一次全量重绘，最终画面正确。
+  {
+    struct winsize ws2;
+    memset(&ws2, 0, sizeof ws2);
+    ws2.ws_col = ws.ws_col;
+    ws2.ws_row = ws.ws_row > 1 ? ws.ws_row - 1 : 2;
+    ioctl(w.master, TIOCSWINSZ, &ws2);
+    usleep(150000);                 // 等 TUI 处理第一个 SIGWINCH 并全量重绘
+  }
+  ioctl(w.master, TIOCSWINSZ, &ws);
+  // Q3/Q4：附着后发送"重绘命令"（Ctrl+L = 0x0C，nano/less/vim/多数 TUI 的
+  // 强制重绘键）触发程序重新绘制；bash 等会清屏重显提示符，历史仍在滚动区。
+  feed_key(w, "\f", 1);
+  term::invalidate();
+  term::present();
+  return true;
+}
+
+// Q6 降级：切换/启动到"已剥离但程序已退出"的槽位——贴回输出文本（滚动区）
+// → 其后显示起始页面文本 → toast `Background PTY NN exited with X`（消费死亡记录）。
+// 返回 false = 无死亡记录。
+bool attach_dead(int n)
+{
+  Win& w = g_wins[n];
+  std::string hist;
+  int code = 0;
+  if (!bgtask::take_dead(n + 1, hist, code)) return false;
+  if (w.ts != nullptr) term::state_free(w.ts);
+  if (w.font_size < 0) w.font_size = g_opt.font_size;
+  w.ts = term::state_new(win_opt(w));
+  if (w.ts == nullptr) return false;
+  w.open = false; w.eof = false; w.exec_failed = false;
+  w.master = -1; w.child = 0; w.adopted = false;
+  w.launcher = true; w.line.clear();
+  w.out_key.clear(); w.out_reply.clear();
+  w.fg_pgrp = 0; w.cursor_reset_pending = false;
+  g_cur = n;
+  use_win(n);
+  term::reset_cursor_style();
+  term::fill_bg();
+  if (!hist.empty()) term::write(hist.data(), hist.size());   // ① 输出文本（滚动区）
+  launcher_banner(n);                                          // ② 起始页面文本 + 提示符
+  term::invalidate();
+  term::present();
+  char tb[64];
+  snprintf(tb, sizeof tb, "Background PTY %02d exited with %d", n + 1, code);
+  term::toast(tb);
+  return true;
+}
+
+void switch_to(int n, bool toast = true, bool banner = true)   // Ctrl+Alt+F1~F12 目标
+{
+  if (n < 0 || n >= g_win_count || n == g_cur) return;
   Win& old = g_wins[g_cur];
   if (!old.open) {                  // 点4：启动器下切窗 = 丢弃原窗口
     if (old.ts != nullptr) term::state_free(old.ts);
@@ -1130,12 +1303,26 @@ void switch_to(int n)               // Ctrl+Alt+F1~F12 目标
     term::view_follow();            // 切窗目标也跳底（离开侧已跳）
     term::invalidate();             // 切窗 = 整屏重画（防旧窗口残留）
     term::present();
+  } else if (bgtask::session_exists(n + 1)) {   // 槽位有被剥离的会话 → 重附着（req 6）
+    if (attach_parked(n)) {
+      if (toast) {
+        char tb[48];
+        snprintf(tb, sizeof tb, "Attached PTY %02d", n + 1);
+        term::toast(tb);
+      }
+      return;
+    }
+    launcher_show(n, banner);       // 附着失败（守护进程/tmux 异常）：退化为初始界面
+  } else if (attach_dead(n)) {
+    return;                          // Q6：死亡记录已展示并自带专用 toast
   } else {
-    launcher_show(n);               // 点3：非活跃窗口 → 初始界面
+    launcher_show(n, banner);       // 点3：非活跃窗口 → 初始界面（banner=false：Fn+H 帮助路径）
   }
-  char tb[48];                      // 事件通知：切到 PTY nn（1 基）
-  snprintf(tb, sizeof tb, "Switched to PTY %02d", n + 1);
-  term::toast(tb);
+  if (toast) {                      // 事件通知：切到 PTY nn（1 基）
+    char tb[48];
+    snprintf(tb, sizeof tb, "Switched to PTY %02d", n + 1);
+    term::toast(tb);
+  }
 }
 
 void kill_all();                // 前置声明（exec failed 直接退出时用）
@@ -1145,7 +1332,7 @@ void kill_all();                // 前置声明（exec failed 直接退出时用
 // 很多 TUI 用 OSC 12 改光标颜色后不会复位，这里在它们退出时兜底恢复默认呈现。
 static void sync_fg_programs()
 {
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < g_win_count; i++) {
     Win& w = g_wins[i];
     if (!w.open || w.master < 0) { w.fg_pgrp = 0; continue; }
     pid_t pg = tcgetpgrp(w.master);
@@ -1166,7 +1353,7 @@ static void sync_fg_programs()
 
 bool check_exits(int* rc)
 {
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < g_win_count; i++) {
     Win& w = g_wins[i];
     if (!w.open) continue;
     bool gone = false;
@@ -1180,6 +1367,8 @@ bool check_exits(int* rc)
       if (waitpid(w.child, &w.status, WNOHANG) == 0) {
         kill(-w.child, SIGKILL);
         waitpid(w.child, &w.status, 0);
+      } else if (w.adopted && w.child > 0 && kill(-w.child, 0) == 0) {
+        kill(-w.child, SIGKILL);        // 附着会话：非亲生 waitpid 不可用，按 pgid 补刀
       }
       gone = true;
     }
@@ -1220,7 +1409,7 @@ bool check_exits(int* rc)
 // 长按 Esc：退出所有程序、关闭全部窗口、退出 cardterm
 void kill_all()
 {
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < g_win_count; i++) {
     Win& w = g_wins[i];
     if (w.open) {
       kill(-w.child, SIGHUP);
@@ -1231,6 +1420,8 @@ void kill_all()
       if (waitpid(w.child, &w.status, WNOHANG) == 0) {
         kill(-w.child, SIGKILL);
         waitpid(w.child, &w.status, 0);
+      } else if (w.adopted && w.child > 0 && kill(-w.child, 0) == 0) {
+        kill(-w.child, SIGKILL);        // 附着会话：非亲生 waitpid 不可用，按 pgid 补刀
       }
       close(w.master); w.master = -1; w.open = false;
       w.out_key.clear(); w.out_reply.clear();   // 出站队列清空释放
@@ -1249,6 +1440,9 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
   // 启动器底部提示行显示 [general] launch 的第一个词（默认 bash）；
   // 空回车运行的默认程序 = [general] launch 分词（空则该行显示/运行 bash）。
   g_conf = cfg::current();
+  g_win_count = g_conf.windows;          // 槽位数（[general] windows；config 已钳位 2–32）
+  if (g_win_count < 2) g_win_count = 2;
+  if (g_win_count > 32) g_win_count = 32;
   g_default_cmd = split_words(g_conf.launch);
   if (g_default_cmd.empty()) g_default_cmd.push_back("bash");
   g_prompt_cmd = g_default_cmd.front();
@@ -1258,7 +1452,26 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
   bool ctrl = false, alt = false;
 
   // 点5：默认位于窗口 1
-  if (!first_cmd.empty()) {                 // cardterm <cmd>：窗口 1 直接开会话
+  // req 8：启动扫描——在第一个窗口初始化/显示 banner 之前检查后台会话
+  // （cardterm_PTY_01..NN）：有则直接附着最小号窗口（不初始化 PTY 01、
+  //  不跑默认启动命令行），并提示 Attached PTY **。
+  const int bg_slot = bgtask::first_existing_session(g_win_count);
+  int dead_slot = -1;               // Q6：已剥离但程序已退出的槽位（最小号优先）
+  for (int i = 0; i < g_win_count && dead_slot < 0; i++)
+    if (bgtask::has_dead(i + 1)) dead_slot = i;
+  if (bg_slot >= 0) {
+    g_cur = bg_slot;
+    if (attach_parked(bg_slot)) {
+      char tb[48];
+      snprintf(tb, sizeof tb, "Attached PTY %02d", bg_slot + 1);
+      term::toast(tb);
+    } else {
+      launcher_show(bg_slot);       // 附着失败（守护进程/tmux 异常）：退化为初始界面
+    }
+  } else if (dead_slot >= 0) {
+    g_cur = dead_slot;
+    if (!attach_dead(dead_slot)) launcher_show(dead_slot);   // 自带专用 toast
+  } else if (!first_cmd.empty()) {          // cardterm <cmd>：窗口 1 直接开会话
     Win& w = g_wins[0];
     w.font_size = opt.font_size;
     w.ts = term::state_new(win_opt(w));
@@ -1347,12 +1560,25 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
       case kbd::Poll::Cmd:
         term::view_follow();                       // FN 组合 = 翻页以外的键 → 跳底
         if (cmd == kbd::Cmd::Close) { close_current(); if (g_quit_after_close) return 0; }
-        else if (cmd == kbd::Cmd::PrevWin) switch_to((g_cur + 11) % 12);
-        else if (cmd == kbd::Cmd::NextWin) switch_to((g_cur + 1) % 12);
+        else if (cmd == kbd::Cmd::PrevWin) switch_to((g_cur + g_win_count - 1) % g_win_count);
+        else if (cmd == kbd::Cmd::NextWin) switch_to((g_cur + 1) % g_win_count);
         else if (cmd == kbd::Cmd::FontDown) change_font(-1);
         else if (cmd == kbd::Cmd::FontUp)   change_font(+1);
-        else if ((int)cmd >= (int)kbd::Cmd::Win1 && (int)cmd <= (int)kbd::Cmd::Win12)
-          switch_to((int)cmd - (int)kbd::Cmd::Win1);   // Super+F1~F12
+        else if (cmd == kbd::Cmd::ShowHelp) show_help_in_empty_window();
+        else if (cmd == kbd::Cmd::Detach) {
+          detach_current();                       // Fn+A / Super+A：剥离到后台
+          if (g_quit_after_close) return 0;       // 剥离末窗：倒计时已结束，退出
+        }
+        else if ((int)cmd >= (int)kbd::Cmd::Win1 && (int)cmd <= (int)kbd::Cmd::Win12) {
+          const int slot = (int)cmd - (int)kbd::Cmd::Win1;   // Super+F1~F12
+          if (slot < g_win_count) switch_to(slot);
+          else {
+            // 目标槽位超出配置的窗口数：提示后不做任何事（见 config [general] windows）
+            char tb[64];
+            snprintf(tb, sizeof tb, "Max PTY is %02d. Edit config.ini.", g_win_count);
+            term::toast(tb);
+          }
+        }
         // Fn+Space（弹出中文输入法）：预留接线。keyboard.h 的 kbd::Cmd 目前没有
         // Space/IME 命令（未改 keyboard.*），等键盘层新增后在此接：
         //   else if (cmd == kbd::Cmd::ImePopup) term::toast("弹出中文输入法 (占位符)");
@@ -1370,7 +1596,16 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
         // ── Ctrl+Alt+F1~F12：切换窗口（仅按下/重复触发）──────────
         if (kev.ev != 3 && (kev.mods & 6) == 6 && t.size() >= 2 && t[0] == 'F') {
           int n = atoi(t.c_str() + 1);
-          if (n >= 1 && n <= 12) { switch_to(n - 1); break; }
+          if (n >= 1 && n <= 12) {
+            if (n <= g_win_count) switch_to(n - 1);
+            else {
+              // 目标槽位超出配置的窗口数：提示后不做任何事
+              char tb[64];
+              snprintf(tb, sizeof tb, "Max PTY is %02d. Edit config.ini.", g_win_count);
+              term::toast(tb);
+            }
+            break;   // 拦截：无论切换还是超限提示，都不再转发给 PTY
+          }
         }
         Win& w = g_wins[g_cur];
         if (w.open) send_key(w, t, kev);

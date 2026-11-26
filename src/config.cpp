@@ -27,6 +27,10 @@ const char* kDefaultIni =
     "#   home / ~ / $HOME = home directory; ~/foo = home/foo; anything else = literal\n"
     "#   path; empty = inherit cardterm's working directory.\n"
     "cwd=home\n"
+    "# Number of terminal window slots (2-32, default 12).\n"
+    "# Shortcut keys targeting a slot above this count only show a toast\n"
+    "# (\"Max PTY is NN. Edit config.ini.\"); windows above 12 are reached with Fn+W / Fn+E.\n"
+    "windows=12\n"
     "# Tell programs that this terminal supports Unicode (UTF-8 locale):\n"
     "#   yes = force LANG/LC_ALL=C.UTF-8 when the inherited locale is not UTF-8 (default)\n"
     "#   no  = LANG=C, so TUI programs draw ACS lines instead of wide glyphs\n"
@@ -43,7 +47,7 @@ const char* kDefaultIni =
     "toast_ms=2000\n"
     "\n"
     "[font]\n"
-    "# Initial font size for every new window (runtime: FN+U / FN+I per window):\n"
+    "# Initial font size for every new window (runtime: Fn+U / Fn+I per window):\n"
     "#   4 = 4x7 small (80x24 cells), 6 = 6x10 normal (53x17, default),\n"
     "#   8 = 8x14 large (40x12; WenQuanYi Bitmap Song 14px + hand-drawn Latin)\n"
     "font_size=6\n"
@@ -88,6 +92,12 @@ const char* kDefaultIni =
     "# any non-paging key jumps immediately.\n"
     "hold_ms=2000\n"
     "\n"
+    "[background]\n"
+    "# Background (detached) sessions: max bytes of the session's plain-text output\n"
+    "# that is buffered while detached and pasted back into the scrollback on reattach\n"
+    "# (16-1048576 KB, default 256 = 256KB; colors are not kept to save memory).\n"
+    "buffer_kb=256\n"
+    "\n"
     "[text]\n"
     "# Splash hint text shown on every new-window / launcher screen, before the\n"
     "# command line. Empty (or key missing) = show NO hint text at all.\n"
@@ -103,7 +113,7 @@ const char* kDefaultIni =
     "#   <pty_id>              = window identifier, e.g. \"PTY 01\" (1-based, two digits)\n"
     "#   <version>             = program version, e.g. \"1.0.0\" (no 'v' prefix)\n"
     "#   <term_size_font_size> = grid + cell size as one string, e.g. \"53x17 cells, 6x10px\"\n"
-    "splash=<fgcolor=80c8ff>cardterm</fgcolor> <fgcolor=a0a0a0>v<version> terminal emulator</fgcolor> <fgcolor=ffffff><pty_id></fgcolor><br>  Window size: <term_size_font_size><br>  fg16 <fgcolor=212421>##</fgcolor><fgcolor=F7285A>##</fgcolor><fgcolor=42B610>##</fgcolor><fgcolor=E7C700>##</fgcolor><fgcolor=21AED6>##</fgcolor><fgcolor=F7AEFF>##</fgcolor><fgcolor=10C39C>##</fgcolor><fgcolor=E7E7E7>##</fgcolor> <fgcolor=636163>##</fgcolor><fgcolor=FF4D52>##</fgcolor><fgcolor=31D752>##</fgcolor><fgcolor=EFEB31>##</fgcolor><fgcolor=5AC7FF>##</fgcolor><fgcolor=FFAAF7>##</fgcolor><fgcolor=21DFC6>##</fgcolor><fgcolor=FFFFFF>##</fgcolor><br>  bg16 <bgcolor=212421>  </bgcolor><bgcolor=F7285A>  </bgcolor><bgcolor=42B610>  </bgcolor><bgcolor=E7C700>  </bgcolor><bgcolor=21AED6>  </bgcolor><bgcolor=F7AEFF>  </bgcolor><bgcolor=10C39C>  </bgcolor><bgcolor=E7E7E7>  </bgcolor> <bgcolor=636163>  </bgcolor><bgcolor=FF4D52>  </bgcolor><bgcolor=31D752>  </bgcolor><bgcolor=EFEB31>  </bgcolor><bgcolor=5AC7FF>  </bgcolor><bgcolor=FFAAF7>  </bgcolor><bgcolor=21DFC6>  </bgcolor><bgcolor=FFFFFF>  </bgcolor><br>  RGB  <bgcolor=DC2828>  </bgcolor><bgcolor=28B450>  </bgcolor><bgcolor=325ADC>  </bgcolor><bgcolor=F0C828>  </bgcolor> <fgcolor=FF0000>TUI</fgcolor> <fgcolor=00FF00>CLI</fgcolor> <fgcolor=0000FF>colors</fgcolor><br>  Enter command (bash/ssh/codex...)<br>  to run it in this terminal.<br>  FN+W / FN+E: switch terminal window.<br>  Hold ESC for 2s: kill all and close.<br>  Type <fgcolor=F0C828>\"help\"</fgcolor> for more information.<br>\n";
+    "splash=<fgcolor=80c8ff>cardterm</fgcolor> <fgcolor=a0a0a0>v<version> terminal emulator</fgcolor> <fgcolor=ffffff><pty_id></fgcolor><br>  Window size: <term_size_font_size><br>  fg16 <fgcolor=212421>##</fgcolor><fgcolor=F7285A>##</fgcolor><fgcolor=42B610>##</fgcolor><fgcolor=E7C700>##</fgcolor><fgcolor=21AED6>##</fgcolor><fgcolor=F7AEFF>##</fgcolor><fgcolor=10C39C>##</fgcolor><fgcolor=E7E7E7>##</fgcolor> <fgcolor=636163>##</fgcolor><fgcolor=FF4D52>##</fgcolor><fgcolor=31D752>##</fgcolor><fgcolor=EFEB31>##</fgcolor><fgcolor=5AC7FF>##</fgcolor><fgcolor=FFAAF7>##</fgcolor><fgcolor=21DFC6>##</fgcolor><fgcolor=FFFFFF>##</fgcolor><br>  bg16 <bgcolor=212421>  </bgcolor><bgcolor=F7285A>  </bgcolor><bgcolor=42B610>  </bgcolor><bgcolor=E7C700>  </bgcolor><bgcolor=21AED6>  </bgcolor><bgcolor=F7AEFF>  </bgcolor><bgcolor=10C39C>  </bgcolor><bgcolor=E7E7E7>  </bgcolor> <bgcolor=636163>  </bgcolor><bgcolor=FF4D52>  </bgcolor><bgcolor=31D752>  </bgcolor><bgcolor=EFEB31>  </bgcolor><bgcolor=5AC7FF>  </bgcolor><bgcolor=FFAAF7>  </bgcolor><bgcolor=21DFC6>  </bgcolor><bgcolor=FFFFFF>  </bgcolor><br>  RGB  <bgcolor=DC2828>  </bgcolor><bgcolor=28B450>  </bgcolor><bgcolor=325ADC>  </bgcolor><bgcolor=F0C828>  </bgcolor> <fgcolor=FF0000>TUI</fgcolor> <fgcolor=00FF00>CLI</fgcolor> <fgcolor=0000FF>colors</fgcolor><br>  Enter command (bash/ssh/codex...)<br>  to run it in this terminal.<br>  Fn+W / Fn+E: switch terminal window.<br>  Hold ESC for 2s: kill all and close.<br>  Press <fgcolor=F0C828>Fn+H</fgcolor> for more information.<br>\n";
 
 void trim(char* s)
 {
@@ -230,9 +240,32 @@ bool load(Config& out)
           out.toast_ms = n;
         }
       }
+      else if (!strcmp(key, "windows")) {             // 窗口槽位数（2–32）
+        int n = atoi(val);
+        if (n > 0) {
+          if (n < 2) n = 2;                           // 超出范围钳位到最近边界
+          if (n > 32) {
+            fprintf(stderr, "[cfg] windows=%d clamped to 32\n", n);
+            n = 32;
+          }
+          out.windows = n;
+        }
+      }
     } else if (!strcmp(section, "font")) {
       if (!strcmp(key, "font_size")) { int n = atoi(val); if (n > 0) out.font_size = n; }
 
+    } else if (!strcmp(section, "background")) {
+      if (!strcmp(key, "buffer_kb")) {                // 后台会话恢复贴回文本上限（KB）
+        int n = atoi(val);
+        if (n > 0) {
+          if (n < 16) n = 16;
+          if (n > 1048576) {
+            fprintf(stderr, "[cfg] buffer_kb=%d clamped to 1048576\n", n);
+            n = 1048576;
+          }
+          out.bg_buffer_kb = n;
+        }
+      }
     } else if (!strcmp(section, "colors")) {
       if (!strcmp(key, "background_color")) parse_hex_color(val, out.bg_color);
       else if (!strcmp(key, "cursor")) parse_hex_color(val, out.cursor_color);

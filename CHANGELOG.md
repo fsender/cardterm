@@ -3,6 +3,66 @@
 cardterm 版本变更记录（格式参考 Keep a Changelog）。
 版本号语义：0.x 阶段按需递增，破坏性/重要变更记入对应版本小节。
 
+## [1.2.0] - 2026-11-26
+
+### 新增
+
+- **窗口数可配置**（`[general] windows=`，**2–32，默认 12**）：直切快捷键
+  （Ctrl+Alt+F1~F12 / 外接 Super+F1~F12）指向超出配置数的窗口时弹出
+  `Max PTY is NN. Edit config.ini.` 提示并忽略；13 号以上窗口用 Fn+W / Fn+E
+  循环到达，超出范围的配置值钳位到最近边界。
+- **剥离期间程序退出的降级展示**：守护进程在清理前存档输出文本与退出码；
+  切回/重启到该槽位时先贴回输出文本、再显示起始页面文本，并提示
+  `Background PTY NN exited with X`（NN 两位数、X=退出返回值）。
+- **附着后触发 TUI 重绘**：会话恢复时发送重绘命令（Ctrl+L）触发程序重绘，
+  并以 ±1 行过渡尺寸触发 SIGWINCH 令 ncurses 重新同步，界面完整恢复。
+
+### 修复
+
+- **缩放后 TUI 不重新布局**：spawn() 不再向子进程导出 `LINES`/`COLUMNS`
+  （env 会钉死 ncurses 的尺寸判定，导致 nano/htop 等 Fn+U/I 后不重排）。
+- **后台会话自动清理**：守护进程泵补 `POLLHUP/POLLERR` 处理，修复
+  "会话程序退出后不自动销毁 + 守护进程忙等空转"；附着前防御已死亡会话
+  （不再出现 Attached 闪现后秒退）。
+- 死亡会话 toast 的退出码此前显示原始 wait 状态字（如 1792），现正确解码。
+
+### 变更
+
+- **商店文案更新**：摘要与详情简介按新版功能亮点重写（高性能/低内存、
+  多窗口、后台会话、config.ini 配置等），英文摘要同步更新。
+
+## [1.1.0] - 2026-11-26
+
+### 新增
+
+- **后台会话支持 / Background session support**（方案 P：PTY 桥接，见
+  `docs/bgtask-design.md`）：
+  - **Fn+A（外接键盘 Super+A）剥离**：把当前窗口正在运行的会话移到后台持续
+    运行（由 `cardterm --bgtaskd` 守护进程接管 PTY，输出桥接进 tmux 会话
+    `cardterm_PTY_NN`；SSH 端 `tmux -L cardterm attach -t cardterm_PTY_NN`
+    也能看能输入），窗口关闭并释放全部内存（输出缓冲不保留）；
+  - 剥离后退出 cardterm 会话照常存活；**再次启动 cardterm 自动扫描并接回**
+    最小号后台会话（`Attached PTY NN`，不初始化 PTY 01、不跑默认命令）；
+    运行中也可切回该窗口重新附着；
+  - 恢复时把剥离期间的输出文本（≤`[background] buffer_kb`，默认 256KB，
+    可配置）贴回滚动区（纯文本、不保留颜色，节省内存），随后销毁 tmux 会话
+    （释放复用器），程序全程不中断；
+  - **全屏倒计时退出提示**（圆角框、14px 边距、2px 线宽、文本居中）：剥离或
+    关闭最后一个窗口时显示 `Detached/PTY NN closed.` + `No terminal running.`
+    + `cardterm will exit in 3s→2s→1s` 后退出（两类共用同一提示）。
+- **Fn+H（外接键盘 Super+H）**：随时切到下一个空闲终端窗口直接显示帮助页
+  （不显示 banner）；所有窗口都忙时无动作。
+- 帮助页新增 Fn+A 说明两行；banner 末行改为 `Press Fn+H for more information`
+  （沿用黄色高亮）。
+
+### 变更
+
+- 快捷键说明 `FN` 全部改为 `Fn`（banner 与帮助页）。
+- 新软件包依赖：`Depends: tmux`（后台会话的显示/缓冲托管）。
+- 商店权限新增**后台任务/后台服务**（`background_service`）。
+- 配置新增 `[background] buffer_kb=256`（后台会话恢复贴回文本上限，16–1048576）。
+- 帮助页排版：删 `Open ~/.config/...` 上方空行（容纳新增行）。
+
 ## [1.0.1] - 2026-11-25
 
 ### 变更

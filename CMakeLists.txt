@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cardterm VERSION 1.0.1 LANGUAGES C CXX)
+project(cardterm VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -30,6 +30,7 @@ add_executable(cardterm
   src/terminal.cpp
   src/config.cpp
   src/session.cpp
+  src/bgtask.cpp
   src/exclusive_display.cpp
   ${LGFX_SOURCES}
 )

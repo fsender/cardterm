@@ -1974,6 +1974,41 @@ void set_toast_enabled(bool on)
 // 屏上当前是否有 toast（session 可用它避免重复提示/决定是否强行 present）。
 bool toast_active() { return s_toast.visible; }
 
+// ── 全屏倒计时退出提示（req 2/3 共用：剥离/关闭最后一个窗口）────────
+// 独立绘制（不依赖终端状态 T，窗口已关闭也可能调用）：整屏铺深底色 →
+// 14px 边距、2px 边框矩形（toast 同款配色：bright0 底 / bright4 边框 /
+// bright7 文字）→ 三行 8x14 文本水平垂直居中。第三行 "cardterm will exit
+// in Ns." 逐秒重绘 3→2→1，各显示满 1 秒后返回（调用方随即退出程序）。
+void exit_prompt(const char* line1)
+{
+  const uint16_t bd = to565(0x5AC7FF);              // bright4：边框
+  const uint16_t bg = to565(0x636163);              // bright0：框内背景
+  const uint16_t fg = to565(0xFFFFFF);              // bright7：文字
+  const int M = 14, B = 2;
+  const int x = M, y = M, w = kCanvasW - 2 * M, h = kCanvasH - 2 * M;
+  tft.fillRect(0, 0, kCanvasW, kCanvasH, to565(0x242424));   // 盒外深底
+  fill_round_rect(x, y, w, h, kToastR, bd);          // 圆角边框矩形（同 toast 圆角）
+  fill_round_rect(x + B, y + B, w - 2 * B, h - 2 * B, kToastR - B, bg);
+
+  const char* l2 = "No terminal running.";
+  char l3[64];
+  const int gap = 10;                                // 行间距
+  const int total = 3 * kToastTextH + 2 * gap;       // 三行总高
+  const int ih = h - 2 * B;
+  for (int n = 3; n >= 1; n--) {
+    snprintf(l3, sizeof l3, "cardterm will exit in %ds.", n);
+    const char* texts[3] = { line1, l2, l3 };
+    int ty = y + B + (ih - total) / 2;
+    for (int i = 0; i < 3; i++) {
+      toast_layout(texts[i]);                        // 复用 toast 的 8x14 排版
+      const int tx = x + B + (w - 2 * B - s_toast.textw) / 2;   // 水平居中
+      if (s_toast.textw > 0 && tx >= x + B) toast_draw_text(tx, ty, fg, bg);
+      ty += kToastTextH + gap;
+    }
+    usleep(1000000);                                 // 每档显示满 1 秒
+  }
+}
+
 // 视图立即跳回底部（公开 API）：翻页以外按键/切窗目标时由 session 调用
 void view_follow() { view_follow_now(); }
 

@@ -659,6 +659,8 @@ void process_external(Dev& d, int slot, const struct input_event& ev)
         case KEY_UP:    case KEY_I: c = Cmd::FontUp;   break;
         case KEY_DOWN:  case KEY_U: c = Cmd::FontDown; break;
         case KEY_Q:                 c = Cmd::Close;    break;
+        case KEY_A:                 c = Cmd::Detach;   break;
+        case KEY_H:                 c = Cmd::ShowHelp; break;
         default:
           if (code >= KEY_F1 && code <= KEY_F10)
             c = (Cmd)((int)Cmd::Win1 + (code - KEY_F1));
@@ -672,6 +674,7 @@ void process_external(Dev& d, int slot, const struct input_event& ev)
       switch (code) {
         case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
         case KEY_W: case KEY_E: case KEY_U: case KEY_I: case KEY_Q:
+        case KEY_A: case KEY_H:
         case KEY_F1: case KEY_F2: case KEY_F3: case KEY_F4: case KEY_F5: case KEY_F6:
         case KEY_F7: case KEY_F8: case KEY_F9: case KEY_F10: case KEY_F11: case KEY_F12:
           return;
@@ -1025,7 +1028,9 @@ void process(const struct input_event& ev)
   if (code == 125 || code == 126) return;    // Meta：静默跳过
   if (code == KEY_CAPSLOCK) return;          // Caps 直接跳过，不实现
 
-  // ── Fn 层窗口快捷键（贴纸：播放/暂停、快退、快进、亮度-/+）────────
+  // ── Fn 层窗口快捷键（贴纸：播放/暂停、快退、快进、亮度-/+、静音、Help）──
+  //  KEY_MUTE=Fn+A（剥离会话）、KEY_HELP=Fn+H（空窗显示帮助）：内核 keymap2
+  //  只在 Fn 层产生这两个键码，无需再查 Fn 状态。
   {
     Cmd c = Cmd::None;
     switch (code) {
@@ -1034,6 +1039,8 @@ void process(const struct input_event& ev)
       case KEY_NEXTSONG:      c = Cmd::NextWin;  break;
       case KEY_BRIGHTNESSDOWN:c = Cmd::FontDown; break;
       case KEY_BRIGHTNESSUP:  c = Cmd::FontUp;   break;
+      case KEY_MUTE:          c = Cmd::Detach;   break;
+      case KEY_HELP:          c = Cmd::ShowHelp; break;
       default: break;
     }
     if (c != Cmd::None) {

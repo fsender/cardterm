@@ -103,6 +103,11 @@ void scroll_view(int delta);        // 翻看回滚：>0 更旧，<0 更新（�
 //   （既有 toast(text, 2000) 调用行为不变）；<=0（含默认参数 0）= 用
 //   set_toast_default_ms() 配置的默认时长（未配置时 2000ms）。
 void toast(const char* text, int ms = 0);
+// 全屏倒计时退出提示（剥离/关闭最后一个窗口时用）：14px 边距、2px 边框、
+// 三行文本居中；第三行随秒显示 3s→2s→1s，随后返回（调用方退出程序）。
+// line1 为场景文案（如 "Detached PTY 03." / "PTY 03 closed."），第二行固定
+// "No terminal running."。独立于终端状态绘制（窗口已关闭、T 可能为空）。
+void exit_prompt(const char* line1);
 // 设置 toast 默认停留时长（进程级）：toast(text)/toast(text, 0) 由此取值；
 // ms<=0 时按 2000 兜底。只影响此后新建的 toast。
 void set_toast_default_ms(int ms);

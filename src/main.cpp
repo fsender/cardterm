@@ -9,7 +9,10 @@
 #define LGFX_USE_V1
 #include "ui.h"
 #include "applaunch_env.h"
+#include "bgtask.h"
 #include "exclusive_display.h"
+
+#include <cstring>
 
 #include <string>
 #include <vector>
@@ -22,6 +25,12 @@ static const unsigned long SHOW_MS = 5000;   // UI 显示时长（取消下方�
 
 int main(int argc, char** argv)
 {
+  // 后台会话模式（见 docs/bgtask-design.md §2）：守护进程 / tmux pane 中继，
+  // 不初始化显示/键盘/独占会话。
+  if (argc >= 2 && strcmp(argv[1], "--bgtaskd") == 0) return bgtask::run_daemon();
+  if (argc >= 4 && strcmp(argv[1], "--bgtask-relay") == 0)
+    return bgtask::run_relay(argv[2], argv[3]);
+
   std::vector<std::string> args;
   for (int i = 1; i < argc; i++) args.emplace_back(argv[i]);
 

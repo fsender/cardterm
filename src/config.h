@@ -5,6 +5,7 @@
 //   [general]
 //   launch=bash                 # 启动命令（留空 = 显示启动器）
 //   cwd=home                    # 启动工作目录（home/~/$HOME = 家目录；留空 = 继承）
+//   windows=12                  # 终端窗口槽位数（2–32，默认 12）
 //   unicode=yes                 # 是否向程序宣称 Unicode（no → LANG=C，TUI 走 ACS 框线）
 //   full_line_newline=no        # 满宽行 + LF 语义（no = xterm/vt.c 行为）
 //   toast=yes                   # 事件通知（toast 叠加层）开关
@@ -22,6 +23,9 @@
 //   [scrollback]
 //   lines=2000                  # 最大回滚行数（100–30000；低于 100 按 100，超限钳到 30000）
 //   hold_ms=2000                # 手动翻页后保持不跳底时长（上限 60000，超限钳位）
+//
+//   [background]
+//   buffer_kb=256               # 后台会话恢复贴回文本上限 KB（16–1048576，默认 256）
 //
 //   [text]
 //   splash=                     # 开屏文本（空 = 内置默认；颜色标签语法见 session.cpp）
@@ -60,6 +64,9 @@ struct Config {
                                     //   范围 200–60000，超出钳位）
   int         font_size = 6;        // 初始字号：4 = 4x7，6 = 6x10（默认），8 = 8x14
                                     //   （每个窗口都可用 FN+U/I 单独调整）
+  int         windows = 12;         // 终端窗口槽位数（[general] windows；2–32，超出钳位）
+  int         bg_buffer_kb = 256;   // 后台会话恢复时贴回的输出文本上限（KB；
+                                    //   [background] buffer_kb，16–1048576，超出钳位）
   // 开屏页自定义文本（[text] splash）：
   //   空 = 用内置默认内容。语法只解析颜色标签，见 session.cpp emit_rich_text：
   //   <br> 换行；<fgcolor=RRGGBB>…</fgcolor>；<bgcolor=RRGGBB>…</bgcolor>；

@@ -13,20 +13,25 @@
 
 ## 特性
 
-- **自定义终端主题颜色**：16 色 ANSI 调色板逐色可配、光标色、真彩（`SGR 38;2`）。
-- **自定义背景图**：PNG/JPG 拉伸铺满，透明背景语义（默认背景透出背景图）。
-- **TUI 兼容性**：crush / opencode / codex / vim / htop / nano / nmtui 等实测渲染与交互
-  正常；备用屏、滚动域、重绘节拍符合 TUI 预期。
-- **Kitty 键盘协议（KKP）**：所声明 flags 完整支持，含 push/pop 与 query。
-- **协议功能**：`OSC 4/10/11/12/52/110-112`、`DA1/DA2/DECXCPR/DSR/DECRQM`、
-  `DECSCUSR`、`DECSTR/RIS` 等。
-- **USB / 蓝牙键盘接管**：板载键盘 + 最多 4 个外接键盘并行、标准 US 键位、热插拔。
-- **轻量化 —— 极低内存占用**：稳态约 6MB（RSS）。
+- **极高性能和极低内存占用**：稳态约 6MB，12 窗口多开会话可控，直驱 /dev/fb0，
+  秒启动，字符渲染更快速。
+- **自定义终端主题颜色和 PNG/JPG 背景图**：16 色 ANSI 调色板逐色可配、光标色、
+  真彩（`SGR 38;2`）；背景图拉伸铺满、透明背景语义。
+- **TUI 兼容性**：codex / opencode / crush / vim / htop / nano 等 TUI 实测渲染与交互
+  正常；备用屏、滚动域、重绘节拍良好。
+- **复杂协议支持**：kitty 键盘协议 (KKP)、`DA1/DA2/DECXCPR/DSR/DECRQM`、
+  `DECSCUSR`、`DECSTR/RIS`、`OSC 4/10/11/12/52/110-112`。
+- **USB/蓝牙外接键盘接管**：板载 + 最多 4 个外接并行、标准 US 键位、热插拔。
+- **多窗口**（`Ctrl+Alt+F1~F12`）、回滚/翻页、三档终端大小（80×24 / 53×17 / 40×12）、
+  toast 事件通知。
+- **后台会话支持**：把会话和程序挂载至后台运行，退出 cardterm 后可恢复——
+  `Fn+A`（外接键盘 `Super+A`）剥离、重开自动接回，剥离期间的输出文本贴回滚动区
+  （纯文本，上限 `[background] buffer_kb`，默认 256KB）。
+- **单 config.ini 配置文件**：主题配色方案、初始命令和工作目录、回滚行数、
+  窗口数、启动横幅文本等多个配置项。
 - **CJK 字形支持**：中文/日文等 CJK 文本由内置点阵字体渲染。
-- **3 种不同终端尺寸**：80×24 / 53×17 / 40×12（4×7 / 6×10 / 8×14），运行时按窗口切换。
 
-另有：12 窗口（`Ctrl+Alt+F1~F12`）、回滚/翻页、toast 事件通知、长按 Esc 两段式退出、
-开屏文本可自定义。
+另有：长按 Esc 两段式退出、`Fn+H` 快捷帮助、开屏文本可自定义。
 
 ![htop @ 80×24（4×7 小字体）](docs/img/0.4.2-htop-80x24.png)
 
@@ -61,12 +66,14 @@ cardterm ssh user@host   # 运行 ssh
 | 按键 | 作用 |
 |---|---|
 | `Ctrl+Alt+F1~F12` | 切换窗口（无会话的窗口显示启动器） |
-| `FN+W` / `FN+E` | 上一个 / 下一个窗口（循环，不论是否活跃） |
-| `FN+Q` | 关闭当前终端（类似关闭标签页） |
-| `FN+U` / `FN+I` | 当前窗口字号变小 / 变大（4×7 / 6×10 / 8×14） |
+| `Fn+W` / `Fn+E` | 上一个 / 下一个窗口（循环，不论是否活跃） |
+| `Fn+Q` | 关闭当前终端（类似关闭标签页） |
+| `Fn+U` / `Fn+I` | 当前窗口字号变小 / 变大（4×7 / 6×10 / 8×14） |
+| `Fn+A` / `Super+A` | 剥离当前会话到后台持续运行（重开 cardterm 自动接回） |
+| `Fn+H` / `Super+H` | 切到下一个空闲窗口并显示帮助页 |
 | `Shift+PgUp/PgDn` | 回滚翻页 |
 | `Ctrl+Shift+↑/↓` | 回滚一行 |
-| 长按 `Esc` 2 秒 | 结束所有窗口并退出（SIGHUP → 宽限 → SIGKILL） |
+| 长按 `Esc` 2 秒 | 结束所有窗口并退出（SIGHUP → 宽限 → SIGKILL；已剥离会话不受影响） |
 
 ## 配置
 
@@ -76,6 +83,7 @@ cardterm ssh user@host   # 运行 ssh
 [general]
 launch=bash                  # 无参数启动时运行；留空 = 启动器
 cwd=home                     # 工作目录：home/~/$HOME；~/x；其它按字面；空=继承
+windows=12                   # 终端窗口槽位数（2–32，默认 12）；直切快捷键超过此数仅弹 toast 提示
 unicode=yes                  # no → LANG=C，TUI 用 ACS 框线
 full_line_newline=no         # 满宽行 + LF 语义（no = xterm/vt.c 行为）
 toast=yes                    # 事件通知（切窗/字号/关窗/退出）的 toast 叠加层开关
@@ -83,7 +91,7 @@ toast_ms=2000                # toast 显示时长 ms（200–60000，超限钳�
 
 [font]
 font_size=6                  # 新窗口初始字号：4 = 4x7（80x24），6 = 6x10（53x17），
-                             #   8 = 8x14（40x12）；运行中用 FN+U / FN+I 按窗口调整
+                             #   8 = 8x14（40x12）；运行中用 Fn+U / Fn+I 按窗口调整
 
 [colors]
 background_color=242424      # RRGGBB
@@ -95,6 +103,10 @@ regular0..7 / bright0..7     # 16 色调色板（foot 默认）
 lines=2000                   # 少于 100 按 100 计；上限 30000
 hold_ms=2000                 # 手动翻页后保持不跳底时长（ms，上限 60000）
 
+[background]
+buffer_kb=256                # 后台会话恢复时贴回的输出文本上限（16–1048576 KB，
+                             #   默认 256；纯文本贴回，节省内存）
+
 [text]
 splash=                      # 开屏文本（空 = 不显示；语法见下）
 ```
@@ -102,14 +114,14 @@ splash=                      # 开屏文本（空 = 不显示；语法见下）
 启动流程：配置了 `launch` 时自动运行它，启动显示与新建窗口一致——先开屏文本，
 再 `> 命令`，换行后是程序自己的提示符（光标在其中）；`launch` 留空则进入启动器。
 
-`[text] splash/help` 支持的颜色标签（不是 XML，只解析这几种，不合法即原样显示）：
+`[text] splash` 支持的颜色标签（不是 XML，只解析这几种，不合法即原样显示）：
 `<br>` 换行；`<fgcolor=RRGGBB>…</fgcolor>` 前景色；`<bgcolor=RRGGBB>…</bgcolor>` 背景色；
 未闭合的颜色标签生效到末尾（可嵌套）；想显示 `<`/`>` 写成不成对/不合法形式即可。
 另支持占位符（在标签解析前替换，未知 `<...>` 原样保留）：`<pty_id>`（如 `PTY 01`）、
 `<version>`（如 `1.0.0`，不含 `v`）、`<term_size_font_size>`（如 `53x17 cells, 6x10px`）。
 默认生成的 `config.ini` 里有内置开屏文本的等价标签写法，可直接编辑。
 
-每个窗口都可在运行时用 `FN+U/I` 单独切换字号。字体细节见 [docs/fonts.md](docs/fonts.md)，
+每个窗口都可在运行时用 `Fn+U/I` 单独切换字号。字体细节见 [docs/fonts.md](docs/fonts.md)，
 **字体/第三方资产的完整归属、许可原文与再分发义务见
 [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**。
 

@@ -14,28 +14,30 @@ ANSI 16/256/truecolor, kitty keyboard protocol.
 
 ## Features
 
-- **Customizable terminal theme** — every color of the 16-color ANSI palette, the cursor
-  color and truecolor (`SGR 38;2`) are individually configurable.
-- **Custom wallpaper** — PNG/JPG scaled to fill the screen, with transparent-background
-  semantics (default background shows the wallpaper through).
-- **TUI compatibility** — crush / opencode / codex / vim / htop / nano / nmtui and more
-  render and interact correctly; alternate screen, scroll regions and redraw pacing
-  behave as TUIs expect.
-- **Kitty keyboard protocol (KKP)** — full support of the flags we claim, with push/pop
-  and query.
-- **Protocol support** — `OSC 4/10/11/12/52/110-112`, `DA1/DA2/DECXCPR/DSR/DECRQM`,
-  `DECSCUSR`, `DECSTR/RIS` and friends.
-- **USB / Bluetooth keyboard takeover** — onboard keyboard plus up to four external
-  keyboards in parallel, standard US layout, hot-pluggable.
-- **Lightweight** — extremely low memory footprint (~6 MB RSS in steady state).
+- **Top performance, tiny memory** — ~6 MB steady state with 12 windows manageable
+  at once; direct /dev/fb0 rendering, instant startup, fast character rendering.
+- **Customizable theme and PNG/JPG wallpaper** — every color of the 16-color ANSI
+  palette, cursor color, truecolor (`SGR 38;2`); wallpaper scaled to fill with
+  transparent-background semantics.
+- **TUI compatibility** — codex / opencode / crush / vim / htop / nano and more
+  render and interact correctly; alternate screen, scroll regions and redraw
+  pacing behave as TUIs expect.
+- **Advanced protocol support** — kitty keyboard protocol (KKP),
+  `DA1/DA2/DECXCPR/DSR/DECRQM`, `DECSCUSR`, `DECSTR/RIS`, `OSC 4/10/11/12/52/110-112`.
+- **USB/Bluetooth external keyboard takeover** — onboard keyboard plus up to four
+  external keyboards in parallel, standard US layout, hot-pluggable.
+- **Multi-window** (`Ctrl+Alt+F1~F12`), scrollback & paging, three terminal grid
+  sizes (80×24 / 53×17 / 40×12), toast notifications.
+- **Background session support** — park sessions and programs in the background and
+  restore them later, even after cardterm exits: `Fn+A` (external keyboards:
+  `Super+A`) detaches; re-opening cardterm re-attaches automatically and pastes back
+  the output produced while detached (plain text, up to `[background] buffer_kb`,
+  default 256 KB).
+- **Single config.ini** — theme/colors, startup command and working directory,
+  scrollback lines, window count, startup banner text and more.
 - **CJK glyph support** — CJK text renders from the built-in bitmap fonts.
-- **Three terminal grid sizes** — 80×24 / 53×17 / 40×12 (4×7 / 6×10 / 8×14),
-  switchable per window at runtime.
 
-Plus: 12 windows (`Ctrl+Alt+F1~F12`), scrollback & paging, toast notifications,
-two-stage Esc-hold exit, customizable splash text.
-
-![htop @ 80×24 (4×7 small font)](docs/img/0.4.2-htop-80x24.png)
+Plus: two-stage Esc-hold exit, `Fn+H` quick help, customizable splash text.
 
 ## Hardware & system
 
@@ -69,9 +71,11 @@ cardterm ssh user@host   # run ssh
 | Key | Action |
 |---|---|
 | `Ctrl+Alt+F1~F12` | Switch window (idle windows show the launcher) |
-| `FN+W` / `FN+E` | Previous / next window (cycles all slots) |
-| `FN+Q` | Close current terminal (like closing a tab) |
-| `FN+U` / `FN+I` | Smaller / larger font for this window (4×7 / 6×10 / 8×14) |
+| `Fn+W` / `Fn+E` | Previous / next window (cycles all slots) |
+| `Fn+Q` | Close current terminal (like closing a tab) |
+| `Fn+U` / `Fn+I` | Smaller / larger font for this window (4×7 / 6×10 / 8×14) |
+| `Fn+A` / `Super+A` | Detach this session to the background (keeps running; reopen to attach) |
+| `Fn+H` / `Super+H` | Show help in the next empty window |
 | `Shift+PgUp/PgDn` | Scrollback by page |
 | `Ctrl+Shift+↑/↓` | Scrollback by line |
 | Hold `Esc` 2 s | Kill all windows and exit (SIGHUP → grace → SIGKILL) |
@@ -85,6 +89,8 @@ unknown keys are ignored):
 [general]
 launch=bash                  # command run at startup with no arguments; empty = launcher
 cwd=home                     # working dir: home/~/$HOME; ~/x; literal otherwise; empty = inherit
+windows=12                   # terminal window slots (2-32, default 12); shortcuts targeting
+                             #   a slot above the count show a toast and do nothing
 unicode=yes                  # no → LANG=C (TUIs draw ACS lines instead of wide glyphs)
 full_line_newline=no         # full-width row + LF semantics (no = xterm/vt.c behavior)
 toast=yes                    # transient toast notifications (switch/zoom/close/exit)
@@ -93,7 +99,7 @@ toast_ms=2000                # toast display time in ms (200–60000, clamped)
 [font]
 font_size=6                  # initial size for new windows: 4 = 4x7 (80x24),
                              #   6 = 6x10 (53x17), 8 = 8x14 (40x12);
-                             #   change per window at runtime with FN+U / FN+I
+                             #   change per window at runtime with Fn+U / Fn+I
 
 [colors]
 background_color=242424      # RRGGBB
@@ -105,6 +111,10 @@ regular0..7 / bright0..7     # 16-color palette (foot defaults)
 lines=2000                   # values under 100 are raised to 100; capped at 30000
 hold_ms=2000                 # keep a manual scroll position this long (ms) before
                              #   jumping back to the bottom; capped at 60000
+
+[background]
+buffer_kb=256                # detached-session output buffered for restore (16–1048576 KB,
+                             #   default 256; pasted back as plain text on re-attach)
 
 [text]
 splash=                      # splash text (empty = show nothing; syntax below)
@@ -124,7 +134,7 @@ Placeholders (replaced before tag parsing; unknown `<...>` kept as-is):
 The generated `config.ini` contains the built-in splash expressed with these tags,
 ready to edit.
 
-Every window can switch sizes independently with `FN+U/I`. Font details:
+Every window can switch sizes independently with `Fn+U/I`. Font details:
 [docs/fonts.md](docs/fonts.md). **Full attribution, license texts and redistribution
 obligations for fonts and third-party assets:
 [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**.
