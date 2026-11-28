@@ -3,6 +3,20 @@
 cardterm 版本变更记录（格式参考 Keep a Changelog）。
 版本号语义：0.x 阶段按需递增，破坏性/重要变更记入对应版本小节。
 
+## [1.3.1] - 2026-11-28 （商店合规打包：用户态服务单元运行时生成）
+
+### 变更
+
+- **用户级 systemd 单元改为运行时生成**：cardterm 首次拉起后台守护前把
+  `cardterm-bgtask.service` 写入用户的 `~/.config/systemd/user/`（ExecStart
+  指向实际二进制路径，Restart=no），仍是用户态 systemd 服务；已存在则尊重
+  用户修改不覆盖，删除该文件即恢复默认。deb 不再向 `/usr/lib/systemd/` 安装
+  任何文件（商店安装路径规则），后台守护行为不变（单元拉起 → fork+exec 回退）。
+- **维护部署精简**：`deploy.sh` 不再推送 `~/apps/cardterm/cardterm-bgtask`，
+  维护布局只保留主程序（bgtask 走 `cardterm --bgtaskd` 旧布局回退）。
+- **商店 summary 精简**：`A better terminal emulator: multi-window, background sessions.`
+  （商店元数据上限 80 字符）。
+
 ## [1.3.0] - 2026-11-28 （正式版）
 
 ### 新增 / 变更

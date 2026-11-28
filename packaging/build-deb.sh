@@ -33,7 +33,6 @@ mkdir -p "$ROOT/DEBIAN" \
          "$ROOT/usr/share/APPLaunch/applications" \
          "$ROOT/usr/share/APPLaunch/share/images" \
          "$ROOT/usr/share/doc/cardterm" \
-         "$ROOT/usr/lib/systemd/user" \
          dist
 
 # 主程序(裁剪符号, Release 发布) + 后台会话管理小二进制（rc216/M1，同包分发）
@@ -42,9 +41,9 @@ chmod 755 "$ROOT/usr/share/APPLaunch/bin/$APPBIN_NAME"
 cp build/cardterm-bgtask "$ROOT/usr/share/APPLaunch/bin/cardterm-bgtask"
 chmod 755 "$ROOT/usr/share/APPLaunch/bin/cardterm-bgtask"
 
-# 后台会话管理的用户级 systemd 单元（Restart=no；cardterm 按需 start）
-install -m 0644 packaging/cardterm-bgtask.service \
-        "$ROOT/usr/lib/systemd/user/cardterm-bgtask.service"
+# 用户级 systemd 单元不再随包安装（1.3.1，商店安装路径规则）：cardterm 首次
+# 拉起守护前把它生成到用户的 ~/.config/systemd/user/cardterm-bgtask.service
+# （仍是用户态 systemd 服务，Restart=no；详见 src/bgtask.cpp ensure_user_unit）。
 
 # 启动项快捷方式 + 本包自带 100x100 图标（.desktop 的 Icon= 指向该绝对路径）
 install -m 0644 packaging/cardterm.desktop \

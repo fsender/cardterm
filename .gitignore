@@ -17,3 +17,4 @@ Makefile
 
 # clangd 缓存
 .cache/
+.tmp/

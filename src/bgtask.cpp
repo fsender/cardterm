@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -391,6 +392,44 @@ std::string bgtask_exe()
   return self;
 }
 
+// 生成用户级 systemd 单元（1.3.1）：单元不再随 deb 装 /usr/lib/systemd/user/
+// （商店安装路径规则不允许该目录），改为首次使用时写到用户自己的
+// ~/.config/systemd/user/cardterm-bgtask.service——仍是用户态 systemd 服务
+// （Restart=no，守护自管 5s 空闲自退）。已存在则尊重用户修改不覆盖；删除该
+// 文件即恢复默认（下次拉起时重新生成）。返回是否刚写入（调用方据此 reload）。
+bool ensure_user_unit(const std::string& exe)
+{
+  const char* h = getenv("HOME");
+  std::string home = (h != nullptr && *h != '\0') ? h : "";
+  if (home.empty()) {
+    struct passwd* pw = getpwuid(getuid());
+    if (pw != nullptr && pw->pw_dir != nullptr && *pw->pw_dir != '\0') home = pw->pw_dir;
+  }
+  if (home.empty()) return false;
+  const std::string dir = home + "/.config/systemd/user";
+  const std::string path = dir + "/cardterm-bgtask.service";
+  struct stat st;
+  if (stat(path.c_str(), &st) == 0) return false;         // 已存在（含用户自改）：不覆盖
+  mkdir((home + "/.config").c_str(), 0755);
+  mkdir((home + "/.config/systemd").c_str(), 0755);
+  mkdir(dir.c_str(), 0755);
+  std::string s;
+  s += "# cardterm-bgtask.service — cardterm 后台会话管理（用户级 systemd）\n";
+  s += "# cardterm 首次拉起时自动生成；删除本文件即恢复默认（下次重新生成）。\n";
+  s += "# Restart=no：守护进程/后台会话退出都不重启（守护自管 5s 空闲自退）。\n";
+  s += "[Unit]\n";
+  s += "Description=cardterm background session manager (bgtask daemon)\n";
+  s += "\n[Service]\n";
+  s += "Type=simple\n";
+  s += "ExecStart=" + exe + " --bgtaskd\n";
+  s += "Restart=no\n";
+  FILE* fp = fopen(path.c_str(), "w");
+  if (fp == nullptr) return false;
+  const size_t n = fwrite(s.data(), 1, s.size(), fp);
+  fclose(fp);
+  return n == s.size();
+}
+
 // 连接守护进程；未运行则启动（systemd 用户单元 → 直接 fork+exec 回退）并重试
 int connect_daemon()
 {
@@ -409,9 +448,12 @@ int connect_daemon()
   int fd = try_connect();
   if (fd >= 0) return fd;
 
-  // ① 用户级 systemd 总体管理（rc216/M1）：cardterm-bgtask.service（Restart=no，
-  //    守护进程/后台会话退出都不重启，行为与直拉一致）。单元缺失或用户会话
-  //    无 systemd 时 systemctl 非零退出，直接走 ②。
+  // ① 用户级 systemd 总体管理（rc216/M1；1.3.1 单元改为运行时生成到
+  //    ~/.config/systemd/user/，行为不变）。单元缺失或用户会话无 systemd 时
+  //    systemctl 非零退出，直接走 ②。
+  const std::string exe1 = bgtask_exe();
+  if (ensure_user_unit(exe1))
+    run_sh("systemctl --user daemon-reload 2>/dev/null");
   if (run_sh("systemctl --user start cardterm-bgtask.service 2>/dev/null") == 0) {
     for (int i = 0; i < 15; i++) {
       usleep(100000);
