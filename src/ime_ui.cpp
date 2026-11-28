@@ -23,9 +23,10 @@ constexpr int kR        = 10;    // 外圆角 r10
 constexpr int kEntryCap = 16;    // 条目最大格宽（序号+句点+7 汉字）
 constexpr int kTextTop  = 1;     // 文本在行内上留 1px
 
-// 颜色配置项（toast/全屏横幅同款）：black=底(bright0)、blue=边框/Tab(bright4)、
-// white=白(bright7)；编辑行用 regular7(pal[7])。RGB888 直到 tft 调用才转 565。
-// config [colors] ime_* 覆盖优先，0 = 默认 bright 色系。
+// 配色：三框共用 popup_* 三色方案（唯一三个配置变量）：black=底(bright0)、
+// blue=边框/Tab(bright4)、white=白(bright7)；框内派生角色不单独配置——
+// 选中高亮=文本/底色反相、状态行=边框色、**编辑行固定 regular7(pal[7])**
+// （不可配置）。RGB888 直到 tft 调用才转 565。
 struct Colors {
   uint32_t base, border, text, sel_bg, sel_fg, status_bg, status_fg, reg7;
   int      transparency = 0;           // [colors] ime_transparency（0–90；0=不透明快速路径）
@@ -34,19 +35,17 @@ struct Colors {
 Colors colors()
 {
   const cfg::UiColors& u = term::ui_colors();
-  // 默认三色与 toast/全屏横幅同源（ui_chrome_colors）：白=文字/高亮底、
-  // 暗=框底/未选中底/高亮字/Tab 字、蓝=边框/Tab 底；ime_* 覆盖优先。
   uint32_t cbg = 0, cbd = 0, cfg = 0;
   term::ui_chrome_colors(&cbg, &cbd, &cfg);
   Colors c;
-  c.base      = u.ime_bg ? u.ime_bg : cbg;
-  c.border    = u.ime_border ? u.ime_border : cbd;
-  c.text      = u.ime_text ? u.ime_text : cfg;
-  c.sel_bg    = u.ime_sel_bg ? u.ime_sel_bg : c.text;
-  c.sel_fg    = u.ime_sel_text ? u.ime_sel_text : c.base;
-  c.status_bg = u.ime_status_bg ? u.ime_status_bg : c.border;
-  c.status_fg = u.ime_status_text ? u.ime_status_text : c.base;
-  c.reg7      = u.ime_compose ? u.ime_compose : term::pal_config(7);
+  c.base      = cbg;
+  c.border    = cbd;
+  c.text      = cfg;
+  c.sel_bg    = c.text;                // 选中高亮：文本色反相
+  c.sel_fg    = c.base;
+  c.status_bg = c.border;              // 状态行：边框色
+  c.status_fg = c.base;
+  c.reg7      = term::pal_config(7);   // 编辑行固定 regular7（不可配置）
   c.transparency = u.ime_transparency;   // 半透明（画布合成口径，见 term::ov_begin）
   return c;
 }

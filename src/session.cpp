@@ -504,7 +504,7 @@ bool g_out_progress = false;        // 上一轮出站排空确有字节写出�
 //   用于 [text] splash 自定义文本与 [general] launch 的启动程序名。
 cfg::Config g_conf;
 std::string g_prompt_cmd = "bash";               // 启动器提示行：launch 第一个词（默认 bash）
-std::vector<std::string> g_default_cmd{"bash"};  // 启动器空回车运行的命令（launch 分词）
+std::vector<std::string> g_default_cmd{"bash"};  // launch 分词（提示行显示用；空回车不执行程序）
 
 // 按空白切分命令行（与 ui.cpp 对 [general] launch 的解析一致）
 std::vector<std::string> split_words(const std::string& s)
@@ -683,8 +683,8 @@ void splash_show(int win)
   if (!g_conf.splash.empty()) emit_rich_text(g_conf.splash, true);
 }
 
-// 启动器底部提示行：显示配置的启动程序名（[general] launch 第一个词，默认 bash），
-// 不再显示 '>'。空回车即运行该程序（见 launcher_enter）。
+// 启动器底部提示行：显示配置的启动程序名（[general] launch 第一个词）。
+// 空回车只刷新提示符（不执行程序）；输入 $SHELL 关键词执行登录 shell。
 void launcher_prompt()
 {
   // 提示符固定为 regular7 的 '>'（与旧版一致）
@@ -745,8 +745,8 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
     h += kGray;   h += desc;
     h += kReset;  h += "\r\n";
   };
-  line("<command>          ", "Run interactive shell or app in");
-  line("                   ", "this window (bash/ssh/codex...)");
+  line("<command>          ", "Run app here (bash/ssh/codex...)");
+  line("Type \"shell\" here  ", "Run user's default shell");
   line("Ctrl+Alt+F1~F12    ", "Switch terminal window");
   line("Fn+Q               ", "Kill and close current window");
   line("Fn+W / Fn+E        ", "Previous / Next terminal window");
@@ -893,7 +893,7 @@ void show_help_in_empty_window()
   term::present();
 }
 
-// 启动器 Enter：help 特例 / 空行 = 运行默认启动程序（launch 第一个词）/
+// 启动器 Enter：help/im 特例 / 空行 = 换行+新提示符（预期行为，不执行程序）/
 // 其余分词后 spawn 进本窗口
 void close_current();   // 前置声明（launcher_enter 的失败分支要用）
 
@@ -937,7 +937,10 @@ void launcher_enter(Win& w)
   std::vector<std::string> av = split_words(line);
   if (av.size() == 1 && av[0] == "help") { launcher_help(); return; }
   if (av.size() == 1 && av[0] == "im")   { launcher_im_help(); return; }   // 中文输入帮助
-  if (av.empty()) {                     // 空回车：不执行任何程序，只重新给提示符
+  // 关键词 $SHELL / shell：打开用户默认登录 shell（读 /etc/passwd，与启动行为一致）
+  if (av.size() == 1 && (av[0] == "$SHELL" || av[0] == "shell"))
+    av[0] = cfg::login_shell();
+  if (av.empty()) {                     // 空回车：不执行任何程序，只重新给提示符（$SHELL 关键词可手输执行登录 shell）
     launcher_prompt();
     return;
   }
@@ -1170,12 +1173,15 @@ void change_font(int dir)           // FN+U(-1) / FN+I(+1)：本窗口字号循�
   w.font_size = kSizes[idx];
 
   if (w.open) {
+    const int old_c = term::kCols, old_r = term::kRows;   // 缩放前网格（开屏尺寸字段原值）
     term::fill_bg();                                     // ① 先整屏填背景（防 rewrap 后右侧/下方残影）
     if (w.ts != nullptr) w.ts = term::state_resize(w.ts, w.font_size);  // ② rewrap（较慢：颜色压缩/解压）
     use_win(g_cur);                                     // ③ 先激活实际网格（OOM 回滚时是旧网格）
     // A3：OOM 回滚时 state_resize 保持旧网格，w.font_size 会与实际脱钩 → 按实际网格反推
     w.font_size = (term::kCols >= 80) ? 4 : (term::kCols <= 40 ? 8 : 6);
     resize_pty(w);                                      // ④ 再按实际全局网格同步 PTY 尺寸（发 SIGWINCH）
+    // 欢迎页尺寸字段随网格刷新（rewrap 后文本仍是旧值；三档尺寸等宽原位替换）
+    term::splash_patch_size(old_c, old_r, term::kCols, term::kRows);
     term::invalidate();
     term::present();                                     // ③ 呈现缩放后界面
     char tb[80];
@@ -1574,7 +1580,7 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
   g_unicode = opt.unicode;
   // 配置快照：ui.cpp 已 cfg::load() 过（cfg::current() 为那次解析结果）。
   // 启动器底部提示行显示 [general] launch 的第一个词（默认 bash）；
-  // 空回车运行的默认程序 = [general] launch 分词（空则该行显示/运行 bash）。
+  // launch 分词（提示行显示用；$SHELL 关键词在执行时解析为 passwd 登录 shell）。
   g_conf = cfg::current();
   g_win_count = g_conf.windows;          // 槽位数（[general] windows；config 已钳位 2–32）
   if (g_win_count < 2) g_win_count = 2;
@@ -1616,21 +1622,21 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
     if (w.ts == nullptr) { logf( "[session] state_new failed\n"); return 1; }
     g_cur = 0;
     use_win(0);
-    // 每次启动都与"新建窗口"一致：开屏文本 + `> 启动命令`（等同用户在新建窗口
-    // 里输入命令并回车），换行后由程序接续自己的真实提示符（光标落在其中）。
-    // 命令显示 = 新建窗口时会输入的命令 = 实际启动命令（launch= 配置或命令行参数）。
-    // launch 未配置时走下方 launcher_show(0)，与新建窗口完全一致（`> [光标]` 等输入）。
+    // 开屏文本 + 直接运行启动程序。
+    // 回显行 `> 启动命令` 仅在无 launch= 有效配置（命令行参数直启）时显示；
+    // launch= 有效配置（默认 $SHELL）时省略该行、直接运行 shell（1.3.1）。
+    // launch 未配置且无参数时走下方 launcher_show(0)，与新建窗口完全一致。
     splash_show(0);
-    launcher_prompt();                                   // regular7 的 '> '
-    {
+    if (g_conf.launch.empty()) {                         // 仅命令行参数直启才回显
+      launcher_prompt();                                 // regular7 的 '> '
       std::string joined;
       for (size_t i = 0; i < first_cmd.size(); i++) {
         if (i) joined += ' ';
         joined += first_cmd[i];
       }
       term::write(joined.c_str(), joined.size());        // 命令文本（默认前景色，同启动器回显）
+      term::write("\r\n", 2);
     }
-    term::write("\r\n", 2);
     int master = -1;
     bool ef = false;
     pid_t pid = spawn(first_cmd, &master, &ef);
@@ -1728,6 +1734,15 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
           if (!g_conf.ime_enabled) {
             term::toast("中文输入已禁用");          // config [ime] enabled=no
           } else if (ime::cn_mode()) {
+            // 中→英：未完成组词按"键入原文"上屏（显示 ni hao → 上屏 nihao）
+            if (ime::composing()) {
+              const std::string raw = ime::take_raw();
+              Win& wc = g_wins[g_cur];
+              if (!raw.empty()) {
+                if (wc.open) feed_key(wc, raw.data(), raw.size());
+                else { wc.line += raw; term::write(raw.data(), raw.size()); }
+              }
+            }
             ime::end();
             g_ime_cn = false;
             term::invalidate();

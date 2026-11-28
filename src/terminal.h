@@ -116,6 +116,9 @@ void toast(const char* text, int ms = 0);
 // line1 为场景文案（如 "PTY 03 exited with 0." / "Detached PTY 03."），第二行固定
 // "No terminal running."。叠加渲染不依赖终端状态（窗口已关闭、T 可能为空）。
 void exit_prompt(const char* line1);
+
+// 开屏尺寸字段原位刷新（缩放后欢迎页 "NxM - Pinyin" 保持与网格一致）
+void splash_patch_size(int old_w, int old_h, int new_w, int new_h);
 // 设置 toast 默认停留时长（进程级）：toast(text)/toast(text, 0) 由此取值；
 // ms<=0 时按 2000 兜底。只影响此后新建的 toast。
 void set_toast_default_ms(int ms);

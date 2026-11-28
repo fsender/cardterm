@@ -28,6 +28,10 @@ bool try_load();
 // 词典/配置齐备 = true。不初始化引擎、不占 rime 常驻内存。
 bool deps_ok();
 
+// 未完成组词的键入原文（去 rime 插入的分隔空格，如显示 "ni hao" → "nihao"），
+// 并清空组词状态。中→英切换时按原文上屏用。
+std::string take_raw();
+
 // 进入中文模式：加载引擎并常驻（dlopen 后不释放）、首次部署单 schema、
 // 建会话并选中 luna_pinyin。false = 引擎/数据不可用（提示“未安装”）。
 bool begin();

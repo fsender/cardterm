@@ -9,7 +9,7 @@
 //   unicode=yes                 # 是否向程序宣称 Unicode（no → LANG=C，TUI 走 ACS 框线）
 //   full_line_newline=no        # 满宽行 + LF 语义（no = xterm/vt.c 行为）
 //   toast=yes                   # 事件通知（toast 叠加层）开关
-//   toast_ms=2000               # toast 显示时长 ms（200–60000，超出钳位）
+//   toast_ms=2500               # toast 显示时长 ms（200–60000，超出钳位）
 //
 //   [ime]                       # 中文输入（拼音 / RIME），详见 kDefaultIni 注释
 //   enable_zh_cn_input=true     # 中文输入功能开关（false = 禁用）
@@ -31,11 +31,11 @@
 //        popup_* 方案；边框建议用较亮较鲜艳的彩色）
 //
 //   [scrollback]
-//   lines=2000                  # 最大回滚行数（100–30000；低于 100 按 100，超限钳到 30000）
-//   hold_ms=2000                # 手动翻页后保持不跳底时长（上限 60000，超限钳位）
+//   lines=5000                  # 最大回滚行数（100–30000；低于 100 按 100，超限钳到 30000）
+//   hold_ms=2500                # 手动翻页后保持不跳底时长（上限 60000，超限钳位）
 //
 //   [background]
-//   buffer_kb=256               # 后台会话恢复贴回文本上限 KB（16–4096=4MB 上限，默认 256）
+//   buffer_kb=1024              # 后台会话恢复贴回文本上限 KB（16–4096=4MB 上限，默认 1024=1MB）
 //
 //   [text]
 //   splash=                     # 开屏文本（空 = 不显示任何提示文本；颜色标签语法见 session.cpp）
@@ -48,22 +48,18 @@
 
 namespace cfg {
 
-// toast / 全屏提示框 / 输入法框 配色（[colors] popup_* / toast_* / prompt_* / ime_*）：
-// 0 = 未配置 → 用默认 bright 色系（与旧行为一致）。
-// popup_* 三色 = 三框共用配色方案（toast、拼音框、退出全屏提示）：
-// 取值为调色板槽位名（regular0-7 / bright0-7，绘制时按当前调色板动态解析）或
-// RRGGBB 十六进制；留空 = 默认 bright0 底 / bright4 边框 / bright7 文字。
+// 三弹窗（toast / 全屏提示框 / 拼音输入框）共用配色——**只有三个变量**：
+// popup_bg_color（通用背景）、popup_border_color（通用边框）、popup_text_color
+// （通用文本）。取值为调色板槽位名（regular0-7 / bright0-7，绘制时按当前
+// 调色板动态解析）或 RRGGBB 十六进制；留空 = 默认 bright0 / bright4 / bright7。
 // 编码：0=未配置；RGB888=固定色；kUiPalFlag|idx=调色板槽位。
-// 各框专用键（toast_* / prompt_* / ime_*，仅 RRGGBB）仍可对单框细化覆盖。
+// 框内派生角色（选中高亮=文本色反相、状态行=边框色、编辑行=文本色）不单独配置。
+// 用户默认登录 shell（关键词 $SHELL / shell 的解析目标；读 /etc/passwd）
+std::string login_shell();
+
 constexpr uint32_t kUiPalFlag = 0x01000000u;
 struct UiColors {
   uint32_t popup_bg = 0, popup_border = 0, popup_text = 0;   // [colors] popup_*_color
-  uint32_t toast_bg = 0, toast_border = 0, toast_text = 0;
-  uint32_t prompt_bg = 0, prompt_border = 0, prompt_text = 0;
-  uint32_t ime_bg = 0, ime_border = 0, ime_text = 0;
-  uint32_t ime_sel_bg = 0, ime_sel_text = 0;
-  uint32_t ime_status_bg = 0, ime_status_text = 0;
-  uint32_t ime_compose = 0;
   // 半透明（[colors] toast_prompt_transparency / ime_transparency，0–90）：
   // 0 = 不透明（默认，快速路径不建画布）；越高越透（上限 90，再高就看不到了）
   int toast_prompt_transparency = 0;   // toast + 全屏提示（同一值）
@@ -87,9 +83,9 @@ struct Config {
                                      //   空 = 继承父进程目录）
   bool        unicode = true;        // 向程序宣称 Unicode 终端（UTF-8 locale）；
                                      //   false = 非 Unicode 环境（LANG=C，TUI 用 ACS 框线）
-  int         scrollback = 2000;    // 最大回滚行数（100–30000：少于 100 按 100 计，
+  int         scrollback = 5000;    // 最大回滚行数（100–30000：少于 100 按 100 计，
                                     //   超过 30000 钳到 30000 并记 stderr）
-  int         view_hold_ms = 2000;  // 手动翻页(Shift+PgUp 等)后保持不跳底时长 ms
+  int         view_hold_ms = 2500;  // 手动翻页(Shift+PgUp 等)后保持不跳底时长 ms
                                     //   （上限 60000，超出钳位）
   // 满宽行 + 换行符的处理（[general] full_line_newline）
   //   false（默认，xterm/vt.c 语义）：LF 只下移一行、取消延迟环绕 → 无空行
@@ -97,12 +93,12 @@ struct Config {
   bool        full_line_newline = false;
   // 事件通知（toast 叠加层）：切窗/字号/关窗/退出等瞬时提示，[general] toast
   bool        toast = true;
-  int         toast_ms = 2000;      // toast 显示时长 ms（[general] toast_ms；
+  int         toast_ms = 2500;      // toast 显示时长 ms（[general] toast_ms；
                                     //   范围 200–60000，超出钳位）
   int         font_size = 6;        // 初始字号：4 = 4x7，6 = 6x10（默认），8 = 8x14
                                     //   （每个窗口都可用 FN+U/I 单独调整）
   int         windows = 12;         // 终端窗口槽位数（[general] windows；2–32，超出钳位）
-  int         bg_buffer_kb = 256;   // 后台会话恢复时贴回的输出文本上限（KB；
+  int         bg_buffer_kb = 1024;  // 后台会话恢复时贴回的输出文本上限（KB；
                                     //   [background] buffer_kb，16–4096（4MB 上限），超出钳位）
   // ── [ime] 中文输入（拼音）子系统 ─────────────────────────────
   bool        ime_enabled = true;       // enable_zh_cn_input：功能开关（默认启用）

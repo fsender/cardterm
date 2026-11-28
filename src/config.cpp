@@ -24,17 +24,6 @@ std::string home_dir()
   return "/tmp";
 }
 
-// 用户默认可交互 shell（默认配置 launch= 的初值）：passwd 登录 shell → $SHELL → /bin/sh。
-// 通常 bash，也可能是 zsh/fish 等，不写死。
-std::string default_shell()
-{
-  struct passwd* pw = getpwuid(getuid());
-  if (pw && pw->pw_shell && *pw->pw_shell) return pw->pw_shell;
-  const char* sh = getenv("SHELL");
-  if (sh && *sh) return sh;
-  return "/bin/sh";
-}
-
 // 默认配置模板：每一项上方都有 1-2 行英文说明（取值/默认值/作用），面向全球用户。
 // 保持与 load() 的解析逻辑兼容；新增键（toast / splash）也在模板中给出示例。
 const char* kDefaultIni =
@@ -44,9 +33,10 @@ const char* kDefaultIni =
     "\n"
     "[general]\n"
     "# Program started automatically when cardterm is launched (space-separated argv).\n"
-    "# Default: your default interactive shell (login shell from /etc/passwd).\n"
+    "# Default: $SHELL (keyword: runs the user's login shell from /etc/passwd).\n"
+    "# In a new empty window, type $SHELL or shell + Enter to open the default shell.\n"
     "# Leave empty to show the launcher instead (type a command there, e.g. bash/ssh).\n"
-    "launch=bash\n"
+    "launch=$SHELL\n"
     "# Working directory for that program:\n"
     "#   home / ~ / $HOME = home directory; ~/foo = home/foo; anything else = literal\n"
     "#   path; empty = inherit cardterm's working directory.\n"
@@ -66,9 +56,9 @@ const char* kDefaultIni =
     "# Show transient toast notifications (window switch / font size / window exit):\n"
     "#   yes = enabled (default), no = disabled\n"
     "toast=yes\n"
-    "# How long each toast stays on screen, in milliseconds (200-60000, default 2000).\n"
+    "# How long each toast stays on screen, in milliseconds (200-60000, default 2500).\n"
     "# Values outside the range are clamped to the nearest bound.\n"
-    "toast_ms=2000\n"
+    "toast_ms=2500\n"
     "\n"
     "[ime]\n"
     "# Chinese (pinyin, RIME) input subsystem.\n"
@@ -139,46 +129,27 @@ const char* kDefaultIni =
     "popup_bg_color=\n"
     "popup_border_color=\n"
     "popup_text_color=\n"
-    "\n"
-    "# Per-popup fine tuning (RRGGBB hex), overriding the popup_* scheme above.\n"
-    "# toast / fullscreen prompt / input-method box colors.\n"
-    "# Leave them commented out = default bright palette (same look as before).\n"
-    "# 尽量使用较亮较鲜艳的彩色替代边框颜色 (prefer bright, vivid colors for borders).\n"
-    "#toast_bg_color=636163\n"
-    "#toast_border_color=5ac7ff\n"
-    "#toast_text_color=ffffff\n"
-    "#prompt_bg_color=636163\n"
-    "#prompt_border_color=5ac7ff\n"
-    "#prompt_text_color=ffffff\n"
-    "#ime_bg_color=636163\n"
-    "#ime_border_color=5ac7ff\n"
-    "#ime_text_color=ffffff\n"
-    "#ime_selected_bg_color=ffffff\n"
-    "#ime_selected_text_color=636163\n"
-    "#ime_status_bg_color=5ac7ff\n"
-    "#ime_status_text_color=636163\n"
-    "#ime_compose_color=e6e6e6\n"
-    "# Overlay transparency (0-90, default 0 = opaque; 0 skips blending for speed).\n"
+    "\n"    "# Overlay transparency (0-90, default 0 = opaque; 0 skips blending for speed).\n"
     "#   Higher = more see-through, capped at 90 so the overlay stays barely visible.\n"
     "#   toast_prompt_transparency: toast + fullscreen prompt; ime_transparency: IME box.\n"
     "toast_prompt_transparency=0\n"
     "ime_transparency=0\n"
     "\n"
     "[scrollback]\n"
-    "# Max scrollback lines kept in memory for every window (100-30000, default 2000):\n"
+    "# Max scrollback lines kept in memory for every window (100-30000, default 5000):\n"
     "#   values below 100 are treated as 100; values above 30000 are clamped to 30000\n"
     "#   (a note is printed to stderr when clamping).\n"
-    "lines=2000\n"
+    "lines=5000\n"
     "# After manual scrolling (Shift+PgUp etc.) keep the view for this long (ms,\n"
     "# max 60000; values above that are clamped) before jumping back to the bottom;\n"
     "# any non-paging key jumps immediately.\n"
-    "hold_ms=2000\n"
+    "hold_ms=2500\n"
     "\n"
     "[background]\n"
     "# Background (detached) sessions: max bytes of the session's plain-text output\n"
     "# that is buffered while detached and pasted back into the scrollback on reattach\n"
-    "# (16-4096 KB, default 256 = 256KB; at most 4MB history; colors are not kept).\n"
-    "buffer_kb=256\n"
+    "# (16-4096 KB, default 1024 = 1MB; at most 4MB history; colors are not kept).\n"
+    "buffer_kb=1024\n"
     "\n"
     "[text]\n"
     "# Splash hint text shown on every new-window / launcher screen, before the\n"
@@ -194,7 +165,8 @@ const char* kDefaultIni =
     "# Placeholders (replaced before tag parsing):\n"
     "#   <pty_id>              = window identifier, e.g. \"PTY 01\" (1-based, two digits)\n"
     "#   <version>             = program version, e.g. \"1.0.0\" (no 'v' prefix)\n"
-    "#   <term_size_font_size> = grid + cell size as one string, e.g. \"53x17 cells, 6x10px\"\n"
+    "#   <term_size_font_size> = terminal grid size (cells), e.g. \"53x17\"\n"
+    "#   <pinyin_status>       = Chinese input status: \"OK\" / \"no library\" / \"unavailable\"\n"
     "splash=<fgcolor=80c8ff>cardterm</fgcolor> <fgcolor=a0a0a0>v<version> terminal emulator</fgcolor> <fgcolor=ffffff><pty_id></fgcolor><br>  <fgcolor=FFFFFF><term_size_font_size></fgcolor> - Pinyin: <fgcolor=5AC7FF><pinyin_status></fgcolor><br>  fg16 <fgcolor=212421>##</fgcolor><fgcolor=F7285A>##</fgcolor><fgcolor=42B610>##</fgcolor><fgcolor=E7C700>##</fgcolor><fgcolor=21AED6>##</fgcolor><fgcolor=F7AEFF>##</fgcolor><fgcolor=10C39C>##</fgcolor><fgcolor=E7E7E7>##</fgcolor> <fgcolor=636163>##</fgcolor><fgcolor=FF4D52>##</fgcolor><fgcolor=31D752>##</fgcolor><fgcolor=EFEB31>##</fgcolor><fgcolor=5AC7FF>##</fgcolor><fgcolor=FFAAF7>##</fgcolor><fgcolor=21DFC6>##</fgcolor><fgcolor=FFFFFF>##</fgcolor><br>  bg16 <bgcolor=212421>  </bgcolor><bgcolor=F7285A>  </bgcolor><bgcolor=42B610>  </bgcolor><bgcolor=E7C700>  </bgcolor><bgcolor=21AED6>  </bgcolor><bgcolor=F7AEFF>  </bgcolor><bgcolor=10C39C>  </bgcolor><bgcolor=E7E7E7>  </bgcolor> <bgcolor=636163>  </bgcolor><bgcolor=FF4D52>  </bgcolor><bgcolor=31D752>  </bgcolor><bgcolor=EFEB31>  </bgcolor><bgcolor=5AC7FF>  </bgcolor><bgcolor=FFAAF7>  </bgcolor><bgcolor=21DFC6>  </bgcolor><bgcolor=FFFFFF>  </bgcolor><br>  RGB  <bgcolor=DC2828>  </bgcolor><bgcolor=28B450>  </bgcolor><bgcolor=325ADC>  </bgcolor><bgcolor=F0C828>  </bgcolor> <fgcolor=FF0000>TUI</fgcolor> <fgcolor=00FF00>CLI</fgcolor> <fgcolor=0000FF>colors</fgcolor><br>  Enter command (bash/ssh/codex...)<br>  to run it in this terminal.<br>  Fn+W / Fn+E: switch terminal window.<br>  Hold ESC for 2s: kill all and close.<br>  Press <fgcolor=F0C828>Fn+H</fgcolor> for more information.<br>\n";
 
 void trim(char* s)
@@ -249,6 +221,16 @@ std::string config_path()
 
 }  // namespace
 
+// 用户默认登录 shell（关键词 $SHELL / shell 的解析目标）：读 /etc/passwd
+// （getpwuid pw_shell），缺失回退 /bin/sh。不做任何环境变量展开。
+std::string login_shell()
+{
+  struct passwd* pw = getpwuid(getuid());
+  const char* sh = (pw != nullptr && pw->pw_shell != nullptr && *pw->pw_shell != '\0')
+                   ? pw->pw_shell : "/bin/sh";
+  return std::string(sh);
+}
+
 // 最近一次 load() 得到的配置（供 session 读取 splash/launch/toast）。
 const Config& current() { return g_last; }
 
@@ -291,13 +273,7 @@ bool load(Config& out)
   if (!f.is_open()) {                                  // 缺省：写入默认样例后回读生效
     FILE* w = fopen(path.c_str(), "w");
     if (w) {
-      // launch= 初值 = 用户默认可交互 shell（模板里的 launch=bash 是占位）
-      std::string text = kDefaultIni;
-      const std::string ph = "launch=bash\n";
-      const size_t pos = text.find(ph);
-      if (pos != std::string::npos)
-        text.replace(pos, ph.size(), "launch=" + default_shell() + "\n");
-      fputs(text.c_str(), w);
+      fputs(kDefaultIni, w);          // launch= 初值即 $SHELL（运行时展开）
       fclose(w);
       g_created = true;                  // 本次运行 = 首次运行（已新建默认模板）
       return load(out);                  // 回读生效
@@ -343,7 +319,7 @@ bool load(Config& out)
     trim(key); trim(val);
 
     if (!strcmp(section, "general")) {
-      if (!strcmp(key, "launch")) out.launch = val;
+      if (!strcmp(key, "launch")) out.launch = val;   // 保留原文（显示 $SHELL；执行时展开）
       else if (!strcmp(key, "cwd")) out.cwd = val;
       else if (!strcmp(key, "unicode")) {
         const char* v = val;
@@ -432,20 +408,6 @@ bool load(Config& out)
       } else if (!strcmp(key, "popup_bg_color")) parse_color_value(val, out.ui.popup_bg);
       else if (!strcmp(key, "popup_border_color")) parse_color_value(val, out.ui.popup_border);
       else if (!strcmp(key, "popup_text_color")) parse_color_value(val, out.ui.popup_text);
-      else if (!strcmp(key, "toast_bg_color")) parse_hex_color(val, out.ui.toast_bg);
-      else if (!strcmp(key, "toast_border_color")) parse_hex_color(val, out.ui.toast_border);
-      else if (!strcmp(key, "toast_text_color")) parse_hex_color(val, out.ui.toast_text);
-      else if (!strcmp(key, "prompt_bg_color")) parse_hex_color(val, out.ui.prompt_bg);
-      else if (!strcmp(key, "prompt_border_color")) parse_hex_color(val, out.ui.prompt_border);
-      else if (!strcmp(key, "prompt_text_color")) parse_hex_color(val, out.ui.prompt_text);
-      else if (!strcmp(key, "ime_bg_color")) parse_hex_color(val, out.ui.ime_bg);
-      else if (!strcmp(key, "ime_border_color")) parse_hex_color(val, out.ui.ime_border);
-      else if (!strcmp(key, "ime_text_color")) parse_hex_color(val, out.ui.ime_text);
-      else if (!strcmp(key, "ime_selected_bg_color")) parse_hex_color(val, out.ui.ime_sel_bg);
-      else if (!strcmp(key, "ime_selected_text_color")) parse_hex_color(val, out.ui.ime_sel_text);
-      else if (!strcmp(key, "ime_status_bg_color")) parse_hex_color(val, out.ui.ime_status_bg);
-      else if (!strcmp(key, "ime_status_text_color")) parse_hex_color(val, out.ui.ime_status_text);
-      else if (!strcmp(key, "ime_compose_color")) parse_hex_color(val, out.ui.ime_compose);
       else if (!strncmp(key, "regular", 7)) {
         int i = atoi(key + 7);
         if (i >= 0 && i < 8) parse_hex_color(val, out.palette[i]);

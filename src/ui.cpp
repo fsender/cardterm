@@ -59,6 +59,9 @@ int ui(const std::vector<std::string>& args)
       else cur += c;
     }
     if (!cur.empty()) first.push_back(cur);
+    // 关键词 $SHELL / shell（单命令词）→ 用户默认登录 shell（读 /etc/passwd）
+    if (first.size() == 1 && (first[0] == "$SHELL" || first[0] == "shell"))
+      first[0] = cfg::login_shell();
   }
   // config.ini [general] cwd=：启动工作目录。APPLaunch 以 /usr/share/APPLaunch
   // 为 WorkingDirectory 启动应用，不切换的话 PTY 子 shell 会落在那里。

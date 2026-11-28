@@ -1311,18 +1311,48 @@ void ov_end_i()
   if (!s_ov_merge || s_ov_color == nullptr) return;
   s_ov_merge = false;
   const int x = s_ov_x, y = s_ov_y, w = s_ov_w, h = s_ov_h;
-  // 干净底：本帧未重画的被盖行先按最新屏缓冲重合成（防逐帧混合累积）
+  uint16_t* buf = (uint16_t*)s_ov_color->getBuffer();
+  const uint16_t* src = buf;                       // 画布1（上半）
+  uint16_t* dst = buf + (size_t)w * h;             // 画布2（下半）
+  // 行带合成：只对 [y0,y1) 像素带读屏→混合→回屏（按框 x 范围裁切）。
+  // 合成层内容未变、仅底衬行变化时逐行带合成；多行变化就逐行带做，
+  // 避免整框全量读/混/写在视频类高频重画场景造成 toast/输入框闪烁。
+  auto blend_band = [&](int y0, int y1) {
+    const int bh = y1 - y0;
+    if (bh <= 0) return;
+    const int off = y0 - y;
+    fb_read_rect(x, y0, w, bh, dst + (size_t)off * w);
+    const size_t n = (size_t)w * bh;
+    const uint16_t* s = src + (size_t)off * w;
+    uint16_t* d = dst + (size_t)off * w;
+    for (size_t i = 0; i < n; i++) {
+      const uint16_t v = s[i];
+      if (v == s_ov_magic) continue;               // 魔数 = 透明区：原样透出
+      const uint16_t o = d[i];
+      d[i] = (v == o) ? o : mix565(o, v, s_ov_t);
+    }
+    tft.pushImage(x, y0, w, bh, d);
+  };
+  if (!s_ov_draw) {
+    // 合成层内容未变、仅底衬行变化：只重合成与本帧重画行相交的行带
+    // （这些行本帧刚画过 = 干净底，无累积问题；其余行保留上帧混合结果）
+    for (int r = y / kCellH; r <= (y + h - 1) / kCellH && r < 32; r++) {
+      if (!(s_frame_painted & (1u << r))) continue;
+      const int y0 = (r * kCellH > y) ? r * kCellH : y;
+      const int y1a = r * kCellH + kCellH;
+      const int y1 = (y1a < y + h) ? y1a : y + h;
+      blend_band(y0, y1);
+    }
+    return;
+  }
+  // 内容重画（画布1 全新）：整框合成。干净底：本帧未重画的被盖行先按
+  // 最新屏缓冲重合成（防逐帧混合累积），再整矩形读/混/写回屏。
   {
     uint32_t need = 0;
     for (int r = y / kCellH; r <= (y + h - 1) / kCellH && r < 32; r++)
       if (!(s_frame_painted & (1u << r))) need |= 1u << r;
     if (need) { T->s_dirty |= need; present_core(); s_frame_painted |= need; }
   }
-  // 画布2（下半）= 屏幕当前像素（只在合成前读一次）；画布1 非魔数像素
-  // 按透明度混合进画布2，魔数像素不拷（原样透出）；完成后画布2 直接回屏
-  uint16_t* buf = (uint16_t*)s_ov_color->getBuffer();
-  const uint16_t* src = buf;                       // 画布1（上半）
-  uint16_t* dst = buf + (size_t)w * h;             // 画布2（下半）
   fb_read_rect(x, y, w, h, dst);
   const size_t n = (size_t)w * h;
   for (size_t i = 0; i < n; i++) {
@@ -2241,17 +2271,13 @@ static uint32_t chrome_one(uint32_t conf, int pal_idx, uint32_t fallback)
   return conf;
 }
 
-// toast/全屏横幅共用三色：toast_* 覆盖优先，否则 popup_* 三色方案（[colors]，
-// 默认 bright0/4/7），再否则当前窗口调色板 bright0/4/7（与 toast_paint 同源同序）。
-// 拼音框默认三色取这里，保证与 toast/横幅一致。
+// toast/全屏横幅/拼音框共用三色：popup_* 三色方案（[colors]，默认 bright0/4/7），
+// 只此三个变量；框内派生角色不单独配置。
 void ui_chrome_colors(uint32_t* bg, uint32_t* border, uint32_t* fg)
 {
-  uint32_t b = chrome_one(s_ui.popup_bg, 8, 0x636163u);       // bright0 → 背景
-  uint32_t d = chrome_one(s_ui.popup_border, 12, 0x5AC7FFu);  // bright4 → 边框
-  uint32_t f = chrome_one(s_ui.popup_text, 15, 0xFFFFFFu);    // bright7 → 文字
-  if (bg != nullptr)     *bg     = s_ui.toast_bg     ? s_ui.toast_bg     : b;
-  if (border != nullptr) *border = s_ui.toast_border ? s_ui.toast_border : d;
-  if (fg != nullptr)     *fg     = s_ui.toast_text   ? s_ui.toast_text   : f;
+  if (bg != nullptr)     *bg     = chrome_one(s_ui.popup_bg, 8, 0x636163u);       // bright0 → 背景
+  if (border != nullptr) *border = chrome_one(s_ui.popup_border, 12, 0x5AC7FFu);  // bright4 → 边框
+  if (fg != nullptr)     *fg     = chrome_one(s_ui.popup_text, 15, 0xFFFFFFu);    // bright7 → 文字
 }
 
 // ── 文本原语（字体表单份实现；给 ime_ui 等叠加层用）───────────────
@@ -2667,6 +2693,41 @@ void draw_text_ink_win(int x, int y, const char* utf8, uint32_t fg, int cap_cell
   }
 }
 
+// ── 开屏尺寸字段原位刷新（1.3.1）────────────────────────────────
+// 欢迎页的尺寸字段（如 "53x17 - Pinyin: OK"）是普通网格文本，缩放 rewrap 后
+// 仍是旧值；扫描全部行（历史+活动），把 "旧尺寸" 5 字符原位替换为新尺寸
+// （三档网格 53x17/80x24/40x12 均为 5 字符等宽，排版不动、颜色不动）。
+// 只改开屏行：要求后随 " - " 或同行含 "Pinyin"，避免误改程序输出。
+void splash_patch_size(int old_w, int old_h, int new_w, int new_h)
+{
+  if (T == nullptr) return;
+  char os[8], ns[8];
+  snprintf(os, sizeof os, "%dx%d", old_w, old_h);
+  snprintf(ns, sizeof ns, "%dx%d", new_w, new_h);
+  if (strcmp(os, ns) == 0) return;
+  auto patch_row = [&](uint16_t* ch, int cols) {
+    if (ch == nullptr) return;
+    bool anchor = false;
+    for (int t = 0; t + 6 <= cols && !anchor; t++)
+      if (ch[t] == 'P' && ch[t + 1] == 'i' && ch[t + 2] == 'n' &&
+          ch[t + 3] == 'y' && ch[t + 4] == 'i' && ch[t + 5] == 'n') anchor = true;
+    for (int x = 0; x + 5 <= cols; x++) {
+      bool m = true;
+      for (int k = 0; k < 5; k++)
+        if (ch[x + k] != (uint16_t)(unsigned char)os[k]) { m = false; break; }
+      if (!m) continue;
+      const bool dash = (x + 8 <= cols && ch[x + 5] == ' ' && ch[x + 6] == '-' && ch[x + 7] == ' ');
+      if (!dash && !anchor) continue;
+      for (int k = 0; k < 5; k++) ch[x + k] = (uint16_t)(unsigned char)ns[k];
+    }
+  };
+  for (int j = 0; j < hist_size(T); j++) { RowB& r = hist_row(T, j); patch_row(r.ch, r.cols); }
+  for (int j = 0; j < T->s_rows; j++) {
+    LiveRowRef r = buf_row(T, j);
+    patch_row(r.ch, T->s_cols);
+  }
+}
+
 // ── 全屏倒计时退出提示（req 2/3 共用：剥离/关闭最后一个窗口、末窗程序自然退出）
 // toast 同款渲染的圆角提示框（42px 上下 / 32px 左右边距），直接叠在终端内容上：
 // 边缘透出之前的输出；显示前清除屏上 toast（同屏不再出现 toast）；
@@ -2676,12 +2737,12 @@ void exit_prompt(const char* line1)
   toast_clear_region();                        // 同屏不出现 toast：先清现存 toast
   // 图层规范：全屏提示框为最上层（高于拼音输入框与 toast）；本框在两者之后
   // 直接绘制，倒计时期间阻塞主循环，不再有合帧补画覆盖其上。
-  // 配色：config [colors] prompt_* 覆盖优先；未配置 = toast 同源三色（保持一致）
+  // 配色：三框共用 popup_* 三色方案（唯一三个配置变量）
   uint32_t cbg = 0, cbd = 0, cfg = 0;
   ui_chrome_colors(&cbg, &cbd, &cfg);
-  const uint16_t bd = to565(s_ui.prompt_border ? s_ui.prompt_border : cbd);
-  const uint16_t bg = to565(s_ui.prompt_bg ? s_ui.prompt_bg : cbg);
-  const uint16_t fg = to565(s_ui.prompt_text ? s_ui.prompt_text : cfg);
+  const uint16_t bd = to565(cbd);
+  const uint16_t bg = to565(cbg);
+  const uint16_t fg = to565(cfg);
   const int MV = 42, MH = 32, B = 2;
   const int x = MH, y = MV, w = kCanvasW - 2 * MH, h = kCanvasH - 2 * MV;   // 256×86
   const char* l2 = "No terminal running.";

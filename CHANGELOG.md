@@ -3,6 +3,26 @@
 cardterm 版本变更记录（格式参考 Keep a Changelog）。
 版本号语义：0.x 阶段按需递增，破坏性/重要变更记入对应版本小节。
 
+## [1.3.2] - 2026-11-28 （shell 关键词与默认时长）
+
+### 新增 / 变更
+
+- **启动器关键词 `$SHELL` / `shell`**：新窗口（无程序）中输入并回车，读
+  /etc/passwd 的用户默认登录 shell 并自动执行，与启动行为一致；关键词共 4 个
+  （help / im / $SHELL / shell），其余输入一律按普通命令执行（无环境变量展开
+  机制）。`$SHELL` 打开默认 shell 已写入默认配置注释。
+- **帮助页第 2、3 行**：`<command>  Run app here (bash/ssh/codex...)` /
+  `Type "shell" here  Run user's default shell`。
+- **新默认时长**：自动滚动延迟 hold_ms 与 toast 显示时间 toast_ms 默认
+  2000→**2500ms**（2.5 秒；设备既有配置不受影响）。
+- 默认 launch=$SHELL（关键词语义）：启动行省略 `> $SHELL` 回显、直接运行
+  shell；显示保留配置原文。
+- 透明合成行带化：合成层未变时仅合成相交行带，消除视频类高频重画下
+  toast/输入框闪烁。
+- 中→英切换未完成组词按键入原文上屏（ni hao → nihao）。
+- rime 用户数据 XDG：`~/.local/share/cardterm`（懒创建，仅启用拼音且可用时）。
+- 默认每窗回滚 5000 行、后台会话贴回缓冲 1MB；欢迎页尺寸字段随缩放刷新。
+
 ## [1.3.1] - 2026-11-28 （商店合规打包：用户态服务单元运行时生成）
 
 ### 变更
@@ -14,6 +34,24 @@ cardterm 版本变更记录（格式参考 Keep a Changelog）。
   任何文件（商店安装路径规则），后台守护行为不变（单元拉起 → fork+exec 回退）。
 - **维护部署精简**：`deploy.sh` 不再推送 `~/apps/cardterm/cardterm-bgtask`，
   维护布局只保留主程序（bgtask 走 `cardterm --bgtaskd` 旧布局回退）。
+- **欢迎页尺寸字段随缩放刷新**（补充）：开窗欢迎页的 `NxM` 字段原为静态网格
+  文本，缩放后不更新；现缩放时等宽原位替换（53x17/80x24/40x12 同为 5 字符，
+  排版与颜色不变），仅匹配开屏行避免误改程序输出
+- **新默认值**（补充）：每窗回滚 2000→5000 行；后台会话贴回缓冲 256KB→1MB
+- **透明合成行带化**（补充）：合成层内容未变、仅底衬行变化时，只对相交行带
+  按框 x 范围读屏-混合-回屏（多行逐行带），不再整框全量重合成；视频类高频
+  重画场景 toast/输入框不再频繁闪烁。内容重画仍走整框合成。
+- **默认 launch=$SHELL**（补充）：默认配置写环境变量 `$SHELL`（指向登录 shell，
+  跨用户通用），运行时展开为实际路径启动。
+- **中→英切换原文上屏**（补充）：组词中按 Fn+空格 切英文时，未完成组词按
+  键入原文上屏（显示 ni hao → 上屏 nihao）。
+- **rime 用户数据 XDG 目录**（补充）：用户目录 = `~/.local/share/cardterm`
+  （XDG 标准存放目录，商店审核口径），词频/自造词 luna_pinyin.userdb 与
+  部署产物落此；**懒创建**——仅在启用拼音且可用（引擎实际加载）时才建目录。
+- **配色配置收敛为 3 个变量**（补充）：`popup_bg_color` / `popup_border_color` /
+  `popup_text_color` 为 toast、全屏提示、拼音框三组件唯一可配色项；删除
+  toast_* / prompt_* / ime_* 等单框细化键（含 ime_compose_color）。框内派生
+  角色不可配置：选中高亮=文本/底色反相、状态行=边框色、编辑行固定 regular7。
 - **商店 summary 精简**：`A better terminal emulator: multi-window, background sessions.`
   （商店元数据上限 80 字符）。
 

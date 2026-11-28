@@ -444,28 +444,34 @@ bool engine_load()
     dlclose(s_dl); s_dl = nullptr; s_api = nullptr; return false;
   }
 
-  // ③ 初始化引擎（用户目录 ~/.local/share/cardterm/pinyin_data，XDG 用户数据：
-  //    词频/自造词 luna_pinyin.userdb（librime 自动落库）与部署产物都在这里；
-  //    旧版目录 ~/.local/share/cardterm/rime 一次性整目录迁移，用户数据不丢）
+  // ③ 初始化引擎（用户目录 = ~/.local/share/cardterm —— XDG 标准存放目录，
+  //    商店审核口径；词频/自造词 luna_pinyin.userdb 与部署产物都在这里。
+  //    懒创建：仅在启用拼音且可用（引擎实际加载）时才建目录）
+  // 用户目录 = ~/.local/share/cardterm（XDG）；懒创建于下方 mkdir_p
+  char user_dir[256] = "";
+  {
+    const char* home = getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+      struct passwd* pw = getpwuid(getuid());
+      home = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : "/tmp";
+    }
+    snprintf(user_dir, sizeof user_dir, "%s/.local/share/cardterm", home);
+  }
+
   RimeTraits traits;
   memset(&traits, 0, sizeof traits);
   traits.data_size = (int)sizeof(RimeTraits);
-  const char* home = getenv("HOME");
-  if (home == nullptr || *home == '\0') {
-    // HOME 缺失：回退 passwd 家目录（不写死任何用户名）
-    struct passwd* pw = getpwuid(getuid());
-    home = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : "/tmp";
-  }
-  static char user_dir[256];
-  snprintf(user_dir, sizeof user_dir, "%s/.local/share/cardterm/pinyin_data", home);
-  char old_dir[256];
-  snprintf(old_dir, sizeof old_dir, "%s/.local/share/cardterm/rime", home);
-  {
-    struct stat st;
-    if (stat(user_dir, &st) != 0 && stat(old_dir, &st) == 0) rename(old_dir, user_dir);
-  }
+  traits.shared_data_dir   = kSharedDir;
+  traits.user_data_dir     = user_dir;   // XDG 标准目录（懒创建）
+  traits.prebuilt_data_dir = kPrebuiltDir;
+  traits.distribution_name = "cardterm";
+  traits.app_name          = "rime.cardterm";
+  traits.min_log_level     = 3;      // 只留 FATAL（"Missing ascii bindings" 等良性 ERROR 不刷屏）
+  traits.log_dir           = "";
+  s_api->setup(&traits);
+  s_api->initialize(&traits);
 
-  // 简繁/标点初值：用户目录写 luna_pinyin.custom.yaml（文件存在 = 尊重用户；
+  // 简繁初值：用户目录写 luna_pinyin.custom.yaml（文件存在 = 尊重用户；
   // 删本文件 = 恢复默认 → 按 config 重新播种，与文件头注释一致）；
   // 由 config [ime] 的 simplified_traditional 生成；
   // 指纹变化 → 下面重新部署单 schema 使配置生效
@@ -478,16 +484,6 @@ bool engine_load()
   const std::string sig_now = file_sig(custom_path);
   const std::string sig_old = read_text_file(stamp_path);
   const bool cfg_changed = (sig_now != sig_old);
-
-  traits.shared_data_dir   = kSharedDir;
-  traits.user_data_dir     = user_dir;
-  traits.prebuilt_data_dir = kPrebuiltDir;
-  traits.distribution_name = "cardterm";
-  traits.app_name          = "rime.cardterm";
-  traits.min_log_level     = 3;      // 只留 FATAL（"Missing ascii bindings" 等良性 ERROR 不刷屏）
-  traits.log_dir           = "";
-  s_api->setup(&traits);
-  s_api->initialize(&traits);
 
   s_sess = s_api->create_session();
   if (s_sess == 0) {
@@ -580,6 +576,14 @@ void set_prefs(bool enabled, Script script, const std::string& custom_symbols)
 }
 
 bool composing() { return s_symbol || s_composing; }
+
+std::string take_raw()
+{
+  std::string out;
+  for (char c : s_preedit) if (c != ' ') out += c;   // 去 rime 自动插入的分隔空格
+  cancel();
+  return out;
+}
 
 void cancel()
 {
