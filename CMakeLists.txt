@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cardterm VERSION 1.2.1 LANGUAGES C CXX)
+project(cardterm VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -32,10 +32,21 @@ add_executable(cardterm
   src/session.cpp
   src/bgtask.cpp
   src/exclusive_display.cpp
+  src/ime.cpp
+  src/ime_ui.cpp
   ${LGFX_SOURCES}
 )
 target_compile_definitions(cardterm PRIVATE LGFX_LINUX_FB)
 target_include_directories(cardterm PRIVATE ${LGFX_ROOT}/src)
 target_link_libraries(cardterm PRIVATE pthread util)   # util: openpty(3)
-# 版本号随 CMake project() 自动同步（横幅/帮助等引用 CARDTERM_VERSION）
-target_compile_definitions(cardterm PRIVATE CARDTERM_VERSION="${PROJECT_VERSION}")
+
+# cardterm-bgtask：后台会话管理小二进制（rc216/M1）——只链 bgtask.cpp，
+# 守护进程/tmux 中继模式；同包分发，cardterm 按需拉起（详见 src/bgtask_main.cpp）。
+add_executable(cardterm-bgtask
+  src/bgtask_main.cpp
+  src/bgtask.cpp
+)
+# 版本号随 CMake project() 自动同步（横幅/帮助等引用 CARDTERM_VERSION）。
+# 1.3.0 正式版已定稿（2026-11-28）：完整版本与 project() 同为纯数字 1.3.0。
+set(CARDTERM_VERSION_FULL "1.3.0")
+target_compile_definitions(cardterm PRIVATE CARDTERM_VERSION="${CARDTERM_VERSION_FULL}")

@@ -23,8 +23,10 @@ enum class Poll { Timeout, Echo, Quit, Mod, Aux, Cmd, EscHint };
 //   FN+Q=KEY_PLAYPAUSE 关闭当前终端；FN+W=KEY_PREVIOUSSONG / FN+E=KEY_NEXTSONG
 //   切换上/下一个窗口；FN+U=KEY_BRIGHTNESSDOWN / FN+I=KEY_BRIGHTNESSUP 缩小/放大字号。
 //   Fn+A=KEY_MUTE 剥离会话到后台；Fn+H=KEY_HELP 空窗口显示帮助（外接键盘 Super+A / Super+H 等价）。
+//   Fn+空格=切换中/英输入法（keymap2 对 Space 维持 KEY_SPACE，靠 Fn 修饰状态区分；
+//   外接键盘 Super+空格 等价）。
 enum class Cmd {
-  None, Close, PrevWin, NextWin, FontDown, FontUp, Detach, ShowHelp,
+  None, Close, PrevWin, NextWin, FontDown, FontUp, Detach, ShowHelp, ImeToggle,
   // Super+F1..F12（外接键盘）：切到第 1..12 个窗口。用枚举尾段做整数区间判断：
   //   if (c >= Cmd::Win1 && c <= Cmd::Win12) slot = int(c) - int(Cmd::Win1);
   Win1, Win2, Win3, Win4, Win5, Win6, Win7, Win8, Win9, Win10, Win11, Win12

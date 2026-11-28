@@ -4,9 +4,13 @@
 //   - 会话/多窗口/启动器逻辑在 session.cpp（窗口管理器）
 #include "ui.h"
 #include <cstdio>
+#include <cstring>
+#include <errno.h>
+#include <pwd.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include "log.h"
 #include "keyboard.h"
 #include "config.h"
 #include "terminal.h"
@@ -20,21 +24,21 @@ int ui(const std::vector<std::string>& args)
 
   // 字号：4 = 4x7，6 = 6x10（默认），8 = 8x14（文泉驿点阵宋体 14px + 手绘西文）。
   // 新的窗口从该字号开始；每个窗口可在运行时用 FN+U/I 单独调整。
-  if (conf.font_size != 4 && conf.font_size != 6 && conf.font_size != 8) {
-    fprintf(stderr, "[cfg] font_size=%d: only 4 (4x7), 6 (6x10), 8 (8x14) are available\n",
-            conf.font_size);
+  if (conf.font_size != 4 && conf.font_size != 6 && conf.font_size != 8)
     conf.font_size = 6;
-  }
+
 
   term::Options opt;
   opt.bg_color   = conf.bg_color;
   opt.bg_image   = conf.bg_image.empty() ? nullptr : conf.bg_image.c_str();
+  opt.bg_image_transparency = conf.bg_image_transparency;
   opt.palette16  = conf.palette;
   opt.scrollback = conf.scrollback;
   opt.view_hold_ms = conf.view_hold_ms;
   opt.cursor_color = conf.cursor_color;
   opt.unicode    = conf.unicode;
   opt.font_size  = conf.font_size;
+  opt.ui         = conf.ui;      // toast/提示框/输入法框配色覆盖（0 = 默认 bright 色系）
 
   if (!kbd::open()) {                    // 打开并独占板载键盘
     term::State* s = term::state_new(opt);
@@ -61,11 +65,20 @@ int ui(const std::vector<std::string>& args)
   // home / ~ / $HOME → 家目录；~/xxx → 家目录下 xxx；其余按字面路径；空 = 继承。
   if (!conf.cwd.empty()) {
     const char* h = getenv("HOME");
-    std::string home = (h && *h) ? h : "/home/me";
+    std::string home;
+    if (h && *h) home = h;
+    else {
+      // HOME 缺失：回退 passwd 家目录（不写死任何用户名）
+      struct passwd* pw = getpwuid(getuid());
+      home = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : "/tmp";
+    }
     std::string d = conf.cwd;
     if (d == "home" || d == "~" || d == "$HOME") d = home;
     else if (d.size() >= 2 && d[0] == '~' && d[1] == '/') d = home + d.substr(1);
-    if (chdir(d.c_str()) != 0) fprintf(stderr, "[ui] chdir(%s) failed\n", d.c_str());
+    // 进程级 chdir（1.3.0-rc207 落地）：此后所有 PTY 子进程继承该目录。
+    // 失败（目录不存在/无权限）：保持继承目录不阻断启动，日志留痕供排查。
+    if (chdir(d.c_str()) != 0)
+      logf("[ui] cwd chdir %s: %s\n", d.c_str(), strerror(errno));
   }
   term::set_full_line_newline(conf.full_line_newline);   // 满宽行+LF 语义（默认 xterm）
   term::set_toast_enabled(conf.toast);                   // 事件通知（toast 叠加层）总开关

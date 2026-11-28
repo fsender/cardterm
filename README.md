@@ -15,7 +15,9 @@ ANSI 16/256/truecolor, kitty keyboard protocol.
 ## Features
 
 - **Top performance, tiny memory** — ~6 MB steady state with 12 windows manageable
-  at once; direct /dev/fb0 rendering, instant startup, fast character rendering.
+  at once (measured on device: 5.4–6.4 MB base; the optional Chinese IME loads the
+  rime engine and adds ≈16 MB while enabled); direct /dev/fb0 rendering, instant
+  startup, fast character rendering.
 - **Customizable theme and PNG/JPG wallpaper** — every color of the 16-color ANSI
   palette, cursor color, truecolor (`SGR 38;2`); wallpaper scaled to fill with
   transparent-background semantics.
@@ -23,7 +25,9 @@ ANSI 16/256/truecolor, kitty keyboard protocol.
   render and interact correctly; alternate screen, scroll regions and redraw
   pacing behave as TUIs expect.
 - **Advanced protocol support** — kitty keyboard protocol (KKP),
-  `DA1/DA2/DECXCPR/DSR/DECRQM`, `DECSCUSR`, `DECSTR/RIS`, `OSC 4/10/11/12/52/110-112`.
+  `DA1/DA2/DECXCPR/DSR/DECRQM`, `DECSCUSR`, `DECSTR/RIS`,
+  `OSC 4/10/11/12/52/110-112` (110/111/112 reset the default foreground /
+  background / cursor color, per xterm ctlseqs).
 - **USB/Bluetooth external keyboard takeover** — onboard keyboard plus up to four
   external keyboards in parallel, standard US layout, hot-pluggable.
 - **Multi-window** (`Ctrl+Alt+F1~F12`), scrollback & paging, three terminal grid
@@ -51,7 +55,7 @@ Plus: two-stage Esc-hold exit, `Fn+H` quick help, customizable splash text.
 ```bash
 cmake --preset aarch64-cross && cmake --build build -j"$(nproc)"
 bash packaging/build-deb.sh          # → dist/cardterm_<ver>-1_arm64.deb
-sudo dpkg -i dist/cardterm_1.0.0-1_arm64.deb
+sudo dpkg -i dist/cardterm_1.3.0-1_arm64.deb
 ```
 
 A **cardterm** launcher entry appears in APPLaunch (`/usr/share/APPLaunch/bin/cardterm`),
@@ -75,7 +79,7 @@ cardterm ssh user@host   # run ssh
 | `Fn+Q` | Close current terminal (like closing a tab) |
 | `Fn+U` / `Fn+I` | Smaller / larger font for this window (4×7 / 6×10 / 8×14) |
 | `Fn+A` / `Super+A` | Detach this session to the background (keeps running; reopen to attach) |
-| `Fn+H` / `Super+H` | Show help in the next empty window |
+| `Fn+H` / `Super+H` | Show help in an empty window (in place when the current window is already empty) |
 | `Shift+PgUp/PgDn` | Scrollback by page |
 | `Ctrl+Shift+↑/↓` | Scrollback by line |
 | Hold `Esc` 2 s | Kill all windows and exit (SIGHUP → grace → SIGKILL) |
@@ -113,8 +117,8 @@ hold_ms=2000                 # keep a manual scroll position this long (ms) befo
                              #   jumping back to the bottom; capped at 60000
 
 [background]
-buffer_kb=256                # detached-session output buffered for restore (16–1048576 KB,
-                             #   default 256; pasted back as plain text on re-attach)
+buffer_kb=256                # detached-session output buffered for restore (16–4096 KB,
+                             #   default 256; at most 4MB of history; pasted back as plain text)
 
 [text]
 splash=                      # splash text (empty = show nothing; syntax below)
@@ -205,7 +209,8 @@ in **[docs/ATTRIBUTION.md](docs/ATTRIBUTION.md)**:
 - Binary distribution must also carry the LovyanGFX FreeBSD license (which includes the
   Adafruit glcdfont BSD notice).
 - The deb ships all of the above at `/usr/share/doc/cardterm/`
-  (`COPYING-GPL-2.0.txt`, `WenQuanYi/source/`, LovyanGFX/Adafruit notices, `LICENSE`).
+  (`fonts/WenQuanYi/COPYING-GPL-2.0.txt`, `fonts/WenQuanYi/source/`,
+  LovyanGFX/Adafruit notices, `LICENSE`).
 
 ## Acknowledgements
 

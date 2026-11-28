@@ -1,9 +1,12 @@
 // session.cpp — PTY 会话实现（见 session.h）
 #include "session.h"
+#include "log.h"
 
 #include "bgtask.h"
 #include "config.h"
 #include "exclusive_display.h"
+#include "ime.h"
+#include "ime_ui.h"
 #include "keyboard.h"
 #include "terminal.h"
 
@@ -33,6 +36,8 @@ int  g_master = -1;                     // 当前窗口 master（终端 DSR/DA/O
 bool g_unicode = true;                  // config.ini [general] unicode=：是否向程序宣称 Unicode
 int  g_fg_tick = 0;                     // sync_fg_programs 降频计数
 bool g_quit_after_close = false;        // 关闭最后一个终端窗口 → 退出程序
+bool g_ime_cn = false;                  // 中文输入模式标记（1.3.0-rc002 仅标记；
+                                        //   Fn+空格 切换，组词/上屏后续 rc 接线）
 
 // ── PTY 出站写路径：非阻塞 + 有界队列 ──────────────────────────────
 // 背景：master 若直接阻塞写，子进程不读 stdin（或 OSC52 大应答塞满 slave
@@ -73,6 +78,9 @@ struct Win {
   int  status = 0;
   term::State* ts = nullptr;        // 该窗口的终端状态
   bool launcher = false;            // 未开窗且显示启动器
+  bool help_shown = false;          // 启动器窗口当前显示帮助页/中文输入帮助页。
+                                    //   Ctrl+H 语义判据：起始页=打开帮助页；
+                                    //   已在帮助页则什么都不做。缩放/回横幅时清零。
   int  font_size = -1;              // 本窗口字号（4/6/8；-1 = 用配置默认）
   std::string line;                 // 启动器输入行
   OutQueue out_key;                 // 出站：按键流（保序）
@@ -109,9 +117,6 @@ ssize_t out_write_some(int fd, const char* p, size_t n)
 // 溢出日志：一次积压只记一条（队空后复位），避免持续积压时刷屏
 void out_log_overflow(const OutQueue& q, const char* tag, int win, const char* why)
 {
-  fprintf(stderr, "[session] out overflow win=%d stream=%s: %s"
-                  " (dropped=%zu bytes, queued=%zu/%zu)\n",
-          win + 1, tag, why, q.dropped, q.bytes, kOutCapBytes);
 }
 
 // 入队：超上限时先丢最旧元素（整条，不切开转义序列）直到放得下；
@@ -145,16 +150,16 @@ void out_write(Win& w, OutQueue& q, const char* tag, const char* p, size_t n)
   if (q.empty()) {
     ssize_t ww = out_write_some(w.master, p, n);
     if (ww < 0) {                           // EIO：slave 全关（窗口即将 EOF 收尾）
-      if (g_dbg) fprintf(stderr, "[session] out %s win=%d write: %s\n", tag, wi + 1, strerror(errno));
+      if (g_dbg) logf( "[session] out %s win=%d write: %s\n", tag, wi + 1, strerror(errno));
       q.clear();
       return;
     }
-    if (g_dbg) fprintf(stderr, "[session] out %s win=%d direct write=%zd/%zu\n", tag, wi + 1, ww, n);
+    if (g_dbg) logf( "[session] out %s win=%d direct write=%zd/%zu\n", tag, wi + 1, ww, n);
     p += ww; n -= (size_t)ww;
     if (n == 0) return;
   }
   out_enqueue(q, tag, wi, p, n);
-  if (g_dbg) fprintf(stderr, "[session] out %s win=%d queued=%zu (+%zu)\n", tag, wi + 1, q.bytes, n);
+  if (g_dbg) logf( "[session] out %s win=%d queued=%zu (+%zu)\n", tag, wi + 1, q.bytes, n);
 }
 
 // 按键流：整条按键序列入队（保序；队满时整条丢最旧按键，不切碎序列）
@@ -172,8 +177,6 @@ size_t out_flush(int fd, int win, OutQueue& q, size_t budget, uint64_t deadline)
     size_t want = (left < budget - total) ? left : (budget - total);
     ssize_t w = out_write_some(fd, f.data() + q.off, want);
     if (w < 0) {                            // EIO 等：写通道已断，弃队列（窗口随后按退出收尾）
-      fprintf(stderr, "[session] out flush win=%d: %s, drop queued %zu bytes\n",
-              win + 1, strerror(errno), q.bytes);
       q.clear();
       break;
     }
@@ -362,7 +365,7 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
   if (exec_failed != nullptr) *exec_failed = false;
   int master = -1, slave = -1;
   if (openpty(&master, &slave, nullptr, nullptr, nullptr) < 0) {
-    fprintf(stderr, "[session] openpty: %s\n", strerror(errno));
+    logf( "[session] openpty: %s\n", strerror(errno));
     return -1;
   }
 
@@ -371,8 +374,7 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
   // 子程序 read/write 行为不变（openpty 的 slave 是独立的打开实例）。
   {
     int fl = fcntl(master, F_GETFL, 0);
-    if (fl < 0 || fcntl(master, F_SETFL, fl | O_NONBLOCK) < 0)
-      fprintf(stderr, "[session] fcntl(master, O_NONBLOCK): %s\n", strerror(errno));
+    if (fl >= 0) (void)fcntl(master, F_SETFL, fl | O_NONBLOCK);   // master 非阻塞
   }
 
   struct winsize ws;
@@ -381,14 +383,53 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
   ws.ws_xpixel = term::kCols * term::kCellW; ws.ws_ypixel = term::kRows * term::kCellH;
   ioctl(slave, TIOCSWINSZ, &ws);
 
+  // ── fork 前备好全部 exec 材料（M1）：多线程进程 fork 后、exec 前只能用
+  //    async-signal-safe 调用，setenv/字符串拼接/容器扩容都会 malloc，落在
+  //    读键线程持锁瞬间即死锁。环境变量取值进程级恒定，直接在父进程设置；
+  //    argv 指针表与失败提示文本同样 fork 前构建，子进程只 write/execvp。
+  // 终端类型：支持 256 色与真彩（本终端已实现）
+  setenv("TERM", "xterm-256color", 1);
+  setenv("COLORTERM", "truecolor", 1);
+  setenv("TERM_PROGRAM", "cardterm", 1);
+  // 注意：这里【不要】setenv COLUMNS/LINES。真实终端（xterm 等）都不导出它们；
+  // 一旦导出，ncurses 的尺寸判定会被 env 钉死在启动值（tinfo/lib_setup.c
+  // _nc_get_screensize：ioctl 之后 env 覆盖 *linep/*colp），导致 nano/htop 等
+  // ncurses 系 TUI 在 Fn+U/I 缩放后不重新布局（实测 A/B 已证）。程序要知道
+  // 尺寸请走 ioctl(TIOCGWINSZ) / terminfo，与主流终端行为一致。
+
+  // Unicode 宣称：默认 UTF-8 locale；关闭时 LANG=C（TUI 程序改用 ACS 框线，
+  // 不再发宽字符/生僻码点，规避字体覆盖与全半角差异）
+  if (g_unicode) {
+    const char* lang = getenv("LANG");
+    const char* lc   = getenv("LC_ALL");
+    const bool utf8 = (lang && (strstr(lang, "UTF-8") || strstr(lang, "utf8"))) ||
+                      (lc && (strstr(lc, "UTF-8") || strstr(lc, "utf8")));
+    if (!utf8) {
+      setenv("LANG", "C.UTF-8", 1);
+      setenv("LC_ALL", "C.UTF-8", 1);
+    }
+  } else {
+    setenv("LANG", "C", 1);
+    setenv("LC_ALL", "C", 1);
+    setenv("LC_CTYPE", "C", 1);
+  }
+
+  std::vector<char*> av;
+  av.reserve(argv.size() + 1);
+  for (const auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
+  av.push_back(nullptr);
+  const std::string emsg = "cardterm: exec failed: " + argv[0] + "\r\n";
+
   // exec 失败检测：CLOEXEC 管道——exec 成功自动关（读到 EOF），失败写 errno
   int errp[2] = {-1, -1};
   if (pipe(errp) == 0) fcntl(errp[1], F_SETFD, FD_CLOEXEC);
 
   pid_t pid = fork();
   if (pid < 0) {
-    fprintf(stderr, "[session] fork: %s\n", strerror(errno));
+    logf( "[session] fork: %s\n", strerror(errno));
     close(master); close(slave);
+    if (errp[0] >= 0) close(errp[0]);            // L1：fork 失败也要关探测管道
+    if (errp[1] >= 0) close(errp[1]);
     return -1;
   }
   if (pid == 0) {
@@ -411,37 +452,6 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
         if (fd != efd) close(fd);
     }
 
-    // 终端类型：支持 256 色与真彩（本终端已实现）
-    setenv("TERM", "xterm-256color", 1);
-    setenv("COLORTERM", "truecolor", 1);
-    setenv("TERM_PROGRAM", "cardterm", 1);
-    // 注意：这里【不要】setenv COLUMNS/LINES。真实终端（xterm 等）都不导出它们；
-    // 一旦导出，ncurses 的尺寸判定会被 env 钉死在启动值（tinfo/lib_setup.c
-    // _nc_get_screensize：ioctl 之后 env 覆盖 *linep/*colp），导致 nano/htop 等
-    // ncurses 系 TUI 在 Fn+U/I 缩放后不重新布局（实测 A/B 已证）。程序要知道
-    // 尺寸请走 ioctl(TIOCGWINSZ) / terminfo，与主流终端行为一致。
-
-    // Unicode 宣称：默认 UTF-8 locale；关闭时 LANG=C（TUI 程序改用 ACS 框线，
-    // 不再发宽字符/生僻码点，规避字体覆盖与全半角差异）
-    if (g_unicode) {
-      const char* lang = getenv("LANG");
-      const char* lc   = getenv("LC_ALL");
-      const bool utf8 = (lang && (strstr(lang, "UTF-8") || strstr(lang, "utf8"))) ||
-                        (lc && (strstr(lc, "UTF-8") || strstr(lc, "utf8")));
-      if (!utf8) {
-        setenv("LANG", "C.UTF-8", 1);
-        setenv("LC_ALL", "C.UTF-8", 1);
-      }
-    } else {
-      setenv("LANG", "C", 1);
-      setenv("LC_ALL", "C", 1);
-      setenv("LC_CTYPE", "C", 1);
-    }
-
-    std::vector<char*> av;
-    av.reserve(argv.size() + 1);
-    for (const auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
-    av.push_back(nullptr);
     if (errp[0] >= 0) close(errp[0]);
     execvp(av[0], av.data());
 
@@ -451,12 +461,7 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
       (void)wn;
       close(efd);
     }
-    std::string e = "cardterm: exec failed: ";
-    e += argv[0];
-    e += ": ";
-    e += strerror(errno);
-    e += "\r\n";
-    ssize_t r = ::write(STDERR_FILENO, e.data(), e.size());
+    ssize_t r = ::write(STDERR_FILENO, emsg.data(), emsg.size());
     (void)r;
     _exit(127);
   }
@@ -479,8 +484,6 @@ int spawn(const std::vector<std::string>& argv, int* master_out, bool* exec_fail
     close(errp[0]);
   }
   *master_out = master;
-  { std::string a; for (const auto& s : argv) { a += s; a += '|'; }
-    fprintf(stderr, "[session] child pid=%d: [%s]\n", (int)pid, a.c_str()); }
   return (int)pid;
 }
 
@@ -519,8 +522,16 @@ std::vector<std::string> split_words(const std::string& s)
 // 自定义开屏/帮助文本的占位符（0.7.6 修订5 定稿语法，在颜色标签解析之前替换）：
 //   <pty_id>              → "PTY 01"   （本窗口编号，1 基两位，整串含 "PTY " 前缀）
 //   <version>             → "0.7.6"    （CARDTERM_VERSION，不含 'v'）
-//   <term_size_font_size> → "53x17 cells, 6x10px"（网格与单元尺寸整串）
+//   <term_size_font_size> → "53x17"    （终端网格 cells 尺寸，1.3.0 起不含字号）
+//   <pinyin_status>       → "OK" / "no library" / "unavailable"（中文输入状态）
 // 未知的 <...> 一律原样保留（与标签解析"非法标签原样显示"一致，不会被吞）。
+// 中文输入状态：OK=已启用且依赖齐备；no library=已启用但缺 librime/词典数据；
+// unavailable=功能未启用（config.ini enable_zh_cn_input=false）。
+const char* pinyin_status_str()
+{
+  if (!g_conf.ime_enabled) return "unavailable";
+  return ime::deps_ok() ? "OK" : "no library";
+}
 std::string expand_placeholders(const std::string& s)
 {
   std::string out;
@@ -535,8 +546,9 @@ std::string expand_placeholders(const std::string& s)
     if (name == "pty_id") {
       snprintf(b, sizeof b, "PTY %02d", g_cur + 1); rep = b;
     } else if (name == "term_size_font_size") {
-      snprintf(b, sizeof b, "%dx%d cells, %dx%dpx",
-               term::kCols, term::kRows, term::kCellW, term::kCellH); rep = b;
+      snprintf(b, sizeof b, "%dx%d", term::kCols, term::kRows); rep = b;
+    } else if (name == "pinyin_status") {
+      rep = pinyin_status_str();
     } else if (name == "version") {
       rep = CARDTERM_VERSION;
     }
@@ -682,31 +694,37 @@ void launcher_prompt()
 
 void launcher_banner(int win)        // 启动器界面 = 开屏文本 + 程序名提示行
 {
+  g_wins[win].help_shown = false;    // 回到开屏页（起始页）：帮助页状态清零
   splash_show(win);
   launcher_prompt();
 }
 
+// 帮助页字号守卫（英文帮助页/中文输入帮助页共用）：帮助文本按 6×10（53×17）
+// 排版，8×14（40×12）下会折行看不清——进入帮助页时若当前窗口是 8×14，自动降档
+// 到 6×10（用户随后可 FN+U/I 改回）。state_new 失败（OOM 等）回滚字号并返回
+// false，调用方放弃本次帮助显示。
+bool help_font_fit()
+{
+  Win& w = g_wins[g_cur];
+  if (w.font_size < 0) w.font_size = g_opt.font_size;
+  if (w.font_size != 8) return true;
+  w.font_size = 6;
+  term::fill_bg();
+  if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
+  w.ts = term::state_new(win_opt(w));
+  if (w.ts == nullptr) {
+    w.font_size = 8;
+    return false;
+  }
+  w.launcher = true; w.line.clear();
+  use_win(g_cur);
+  return true;
+}
+
 void launcher_help()                // help：清屏 + 帮助 + 回到启动器
 {
-  // 帮助文本按 6×10（53×17）排版，8×14（40×12）下会折行看不清——
-  // 进入帮助页时若当前窗口是 8×14，自动降档到 6×10（用户随后可 FN+U/I 改回）。
-  {
-    Win& w = g_wins[g_cur];
-    if (w.font_size < 0) w.font_size = g_opt.font_size;
-    if (w.font_size == 8) {
-      w.font_size = 6;
-      term::fill_bg();
-      if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
-      w.ts = term::state_new(win_opt(w));
-      if (w.ts == nullptr) {                 // OOM 等极端情况：回滚字号并放弃本次帮助显示
-        fprintf(stderr, "[session] state_new failed (help font)\n");
-        w.font_size = 8;
-        return;
-      }
-      w.launcher = true; w.line.clear();
-      use_win(g_cur);
-    }
-  }
+  if (!help_font_fit()) return;
+  g_wins[g_cur].help_shown = true;          // 帮助页状态（Ctrl+H 判据）
   term::write("\033[2J\033[H");
   // 帮助页为内置固定内容（不再支持自定义；开屏页 [text] splash 仍可自定义）。
   // 第一行/末尾 '>' 蓝色，快捷键列黄色，说明列默认灰
@@ -714,9 +732,13 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   const char* kYellow = "\033[38;2;231;199;0m";
   const char* kGray   = "\033[38;2;160;160;160m";
   const char* kWhite  = "\033[38;2;255;255;255m";
+  const char* kBright7= "\033[97m";          // bright7（跟随调色板）
   const char* kReset  = "\033[0m";
+  char pty[16];
+  snprintf(pty, sizeof pty, "PTY %02d", g_cur + 1);   // 帮助页所在窗口编号
   std::string h;
-  h += kBlue; h += "  cardterm v" CARDTERM_VERSION " help"; h += kReset; h += "\r\n";
+  h += kBlue; h += "  cardterm v" CARDTERM_VERSION " help"; h += kReset;
+  h += " "; h += kBright7; h += pty; h += kReset; h += "\r\n";
   // 左列 19 字符定宽（与帮助页排版一致），右列为说明文字
   auto line = [&](const char* key, const char* desc) {
     h += kYellow; h += key;
@@ -732,6 +754,10 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   line("Fn+A               ", "Detach terminal and move it to");
   line("                   ", "background. Reopen to attach.");
   line("Hold ESC for 2s    ", "Kill, close all window and exit");
+  // 中文输入帮助入口（1.3.0）：取代原先 <->提示符之间的空行。
+  // 未启用中文输入时不显示本提示行（im 入口命令本身仍保留，简化代码设计）。
+  if (g_conf.ime_enabled)
+    line("Type \"im\" here     ", "Help about CN Input method.");
   // 配置文件提示（文件名亮绿色，其余默认颜色）
   h += kReset;
   h += "Open ";
@@ -744,6 +770,61 @@ void launcher_help()                // help：清屏 + 帮助 + 回到启动器
   h += kReset; h += ". Visit\r\n";
   h += kBlue; h += "https://github.com/fsender/cardterm";
   h += kReset; h += " for more info.\r\n";
+  h += kBlue; h += "> "; h += kReset;
+  term::write(h.c_str(), h.size());
+}
+
+// 中文输入法帮助页（1.3.0 拼音起步）：启动器输入 im 打开；排版与配色同英文
+// 帮助页（标题 cardterm 蓝色、PTY 编号 bright7、键名列黄色/说明列灰、命令绿色
+// 高亮、末尾 '>' 蓝色）。页面地位等同英文帮助页：缩放后回到开屏页（launcher_banner）。
+void launcher_im_help()
+{
+  if (!help_font_fit()) return;
+  g_wins[g_cur].help_shown = true;          // 帮助页状态（Ctrl+H 判据）：同英文帮助页
+  term::write("\033[2J\033[H");
+  const char* kBlue   = "\033[38;2;80;200;255m";
+  const char* kYellow = "\033[38;2;231;199;0m";
+  const char* kGray   = "\033[38;2;160;160;160m";
+  const char* kGreen  = "\033[38;2;80;255;80m";
+  const char* kCyan   = "\033[38;2;36;223;196m";   // 青色（bright6 24DFC4）
+  const char* kBright7= "\033[97m";
+  const char* kReset  = "\033[0m";
+  char pty[16];
+  snprintf(pty, sizeof pty, "PTY %02d", g_cur + 1);
+  std::string h;
+  h += kBlue; h += "  cardterm 中文输入法帮助"; h += kReset;
+  h += " "; h += kBright7; h += pty; h += kReset; h += "\r\n";
+  h += "\r\n";                                   // 标题后空行（1.3.0）
+  // 键名列 12 单元格（CJK 双宽），说明列灰（排版同英文帮助页的键/说明两列）
+  auto line = [&](const char* key, const char* desc) {
+    h += kYellow; h += key;
+    h += kGray;   h += desc;
+    h += kReset;  h += "\r\n";
+  };
+  line("Fn+空格     ", "切换中/英文输入法");
+  line("tab         ", "向后切换候选页. 按住 Shift 则向前切换");
+  line("空格        ", "选中高亮词并输入给会话/程序");
+  line("Enter       ", "直接将键入的英文字母输入会话/程序");
+  line("数字 1~9    ", "选中对应编号的词并输入会话/程序");
+  line("Fn+F/X/Z/C  ", "移动选择高亮词, 左右方向可跨候选页选择");
+  h += "\r\n";
+  // 安装指命：apt 命令青色高亮（1.3.0 由绿色改青色）；命令较长，
+  // 按屏宽拆两行书写避免在 53 列下单词中间硬折行。
+  h += "安装输入法框架, 请运行 ";
+  h += kCyan; h += "sudo apt install librime1t64"; h += kReset; h += "\r\n";
+  h += kCyan; h += "rime-data-luna-pinyin rime-prelude -y"; h += kReset; h += "\r\n";
+  // 依赖状态行（1.3.0）：绿=全部已安装可用 / 亮黄=缺少部分库 / 红=功能未启用
+  if (!g_conf.ime_enabled) {
+    h += "输入框架依赖库状态: ";
+    h += "\033[38;2;255;0;0m"; h += "功能未启用, 请编辑 config.ini";
+  } else if (!ime::deps_ok()) {
+    h += "输入框架依赖库状态: ";
+    h += "\033[38;2;255;238;51m"; h += "缺少部分库, 暂不可用";
+  } else {
+    h += "中文输入功能: ";
+    h += kGreen; h += "全部已安装, 可用";
+  }
+  h += kReset; h += "\r\n";
   h += "\r\n";
   h += kBlue; h += "> "; h += kReset;
   term::write(h.c_str(), h.size());
@@ -755,7 +836,7 @@ void launcher_show(int n, bool show_banner = true)   // 初始界面（重建状
   if (w.font_size < 0) w.font_size = g_opt.font_size;
   if (w.ts != nullptr) term::state_free(w.ts);
   w.ts = term::state_new(win_opt(w));
-  if (w.ts == nullptr) { fprintf(stderr, "[session] state_new failed (launcher)\n"); return; }
+  if (w.ts == nullptr) { return; }
   w.open = false; w.eof = false; w.master = -1;
   w.out_key.clear(); w.out_reply.clear();   // 启动器无 PTY：出站队列必须为空
   w.launcher = true; w.line.clear();
@@ -773,11 +854,26 @@ void launcher_show(int n, bool show_banner = true)   // 初始界面（重建状
 void switch_to(int n, bool toast, bool banner);   // 前置声明（定义见下）
 void show_help_in_empty_window()
 {
+  // 后台会话一次枚举（rc211/M6）：原逐槽 popen("tmux has-session") 在多窗占位时
+  // 一次 Fn+H 串行 fork 12+ 进程；现单次 list-sessions 后查表。
+  const std::vector<std::string> bg = bgtask::list_sessions();
+  auto has_bg = [&bg](int n1) {
+    const std::string want = bgtask::slot_name(n1);
+    for (const auto& s : bg) if (s == want) return true;
+    return false;
+  };
+  // 当前窗口已是空 PTY（无会话/程序、无后台会话）：就地切到本窗口帮助页
+  if (!g_wins[g_cur].open && !has_bg(g_cur + 1) && !bgtask::has_dead(g_cur + 1)) {
+    if (g_wins[g_cur].ts == nullptr) launcher_show(g_cur, false);
+    launcher_help();
+    term::present();
+    return;
+  }
   int target = -1;
   for (int k = 1; k < g_win_count; k++) {
     int i = (g_cur + k) % g_win_count;
     // 空槽 = 无会话/程序、无后台会话、无死亡记录（死亡记录槽位不算空，会走 attach_dead）
-    if (!g_wins[i].open && !bgtask::session_exists(i + 1) && !bgtask::has_dead(i + 1)) {
+    if (!g_wins[i].open && !has_bg(i + 1) && !bgtask::has_dead(i + 1)) {
       target = i;
       break;
     }
@@ -840,6 +936,7 @@ void launcher_enter(Win& w)
   term::write("\r\n");
   std::vector<std::string> av = split_words(line);
   if (av.size() == 1 && av[0] == "help") { launcher_help(); return; }
+  if (av.size() == 1 && av[0] == "im")   { launcher_im_help(); return; }   // 中文输入帮助
   if (av.empty()) {                     // 空回车：不执行任何程序，只重新给提示符
     launcher_prompt();
     return;
@@ -887,9 +984,29 @@ void launcher_enter(Win& w)
 void launcher_key(Win& w, const std::string& t, const kbd::KeyEvent& kev)
 {
   if (kev.ev == 3) return;                       // 松开不回显
+  // Ctrl+H（无 Alt）：起始页上等效输入 help（打开英文帮助页）；
+  // 已在帮助页/中文输入帮助页则什么都不做。窗口开着程序时不走这里——
+  // Ctrl+H 照常转发 ^H (0x08) 给 PTY。
+  if ((kev.mods & 4) && !(kev.mods & 2) && t == "h") {
+    if (!w.help_shown) {
+      w.line.clear();
+      term::write("\r\n");                       // 结束当前提示行（半输入的字留着进回滚）
+      launcher_help();
+    }
+    return;
+  }
   if (t == "Enter") { launcher_enter(w); return; }
   if (t == "Bksp") {
-    if (!w.line.empty()) { w.line.pop_back(); term::backspace(); }
+    if (!w.line.empty()) {
+      // UTF-8 感知退格（1.3.0-rc003：中文上屏进输入行后删整字不碎码）：
+      // 回删一个码点；3/4 字节序列（CJK/emoji）占 2 格 → 退 2 次格
+      size_t i = w.line.size() - 1;
+      while (i > 0 && ((unsigned char)w.line[i] & 0xC0) == 0x80) i--;
+      const int cells = ((unsigned char)w.line[i] >= 0xE0) ? 2 : 1;
+      w.line.erase(i);
+      term::backspace();
+      if (cells == 2) term::backspace();
+    }
     return;
   }
   if (t.size() == 1 && (kev.mods & 6) == 0 && (unsigned char)t[0] >= 0x20) {
@@ -1070,7 +1187,7 @@ void change_font(int dir)           // FN+U(-1) / FN+I(+1)：本窗口字号循�
     term::fill_bg();
     if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
     w.ts = term::state_new(win_opt(w));
-    if (w.ts == nullptr) { fprintf(stderr, "[session] state_new failed (font)\n"); w.font_size = old_fs; return; }
+    if (w.ts == nullptr) { w.font_size = old_fs; return; }
     w.launcher = true; w.line.clear();
     use_win(g_cur);
     launcher_banner(g_cur);
@@ -1085,6 +1202,7 @@ void change_font(int dir)           // FN+U(-1) / FN+I(+1)：本窗口字号循�
 void close_current()                // FN+Q：关闭当前终端（类似关闭标签页）
 {
   Win& w = g_wins[g_cur];
+  ime::cancel();                    // 组词状态随窗口收尾（1.3.0-rc003）
   const int  closed_win = g_cur;    // toast 用：被关闭的槽位（1 基）
   const bool was_open = w.open;
   if (w.open) {
@@ -1105,7 +1223,6 @@ void close_current()                // FN+Q：关闭当前终端（类似关闭�
     w.out_key.clear(); w.out_reply.clear();   // 出站队列随窗口关闭释放
     w.master = -1; w.open = false; w.eof = false; w.child = 0;
   }
-  if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
   w.launcher = false; w.line.clear();
   g_master = -1;
 
@@ -1136,6 +1253,9 @@ void close_current()                // FN+Q：关闭当前终端（类似关闭�
     }
     g_quit_after_close = true;
   }
+  // 状态释放在提示之后（rc208/M2）：exit_prompt 的半透明合成需要当前状态
+  // （T）做"干净底"重合成；先释放会让透明模式下提示框完全不渲染还空等 3s。
+  if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
 }
 
 int first_open()
@@ -1170,7 +1290,6 @@ void detach_current()
   w.open = false; w.eof = false; w.exec_failed = false; w.adopted = false;
   w.child = 0; w.fg_pgrp = 0; w.cursor_reset_pending = false;
   w.out_key.clear(); w.out_reply.clear();
-  if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
   w.launcher = false; w.line.clear();
 
   int nxt = -1;                     // 切到下一个仍开着的窗口（同 close_current 语义）
@@ -1195,6 +1314,8 @@ void detach_current()
     term::exit_prompt(tb);          // req 2：全屏倒计时 3s→2s→1s（会话保活）
     g_quit_after_close = true;
   }
+  // 状态释放在提示之后（rc208/M2，同 close_current）：透明合成需要当前状态做干净底。
+  if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
 }
 
 int status_code(int st)
@@ -1293,6 +1414,7 @@ bool attach_dead(int n)
 void switch_to(int n, bool toast = true, bool banner = true)   // Ctrl+Alt+F1~F12 目标
 {
   if (n < 0 || n >= g_win_count || n == g_cur) return;
+  ime::cancel();                    // 组词状态随切窗收尾（1.3.0-rc003）
   Win& old = g_wins[g_cur];
   if (!old.open) {                  // 点4：启动器下切窗 = 丢弃原窗口
     if (old.ts != nullptr) term::state_free(old.ts);
@@ -1388,7 +1510,6 @@ bool check_exits(int* rc)
     w.cursor_reset_pending = false; w.fg_pgrp = 0;
     int st = w.status;
     const int code = status_code(st);
-    fprintf(stderr, "[exit] win=%d status=%d raw=%d\n", i, code, st);
     w.open = false;
     // 事件通知：窗口（含后台窗口）的程序退出 —— 先切到可见窗口再弹 toast
     char tb[96];
@@ -1401,7 +1522,13 @@ bool check_exits(int* rc)
         term::toast(tb);
         continue;
       }
-      // 没有其它开窗：直接退出程序（与"关掉最后一个窗口"一致）
+      // 没有其它开窗：末窗程序自然退出（Ctrl+D / exit / 程序结束）→
+      // 全屏倒计时提示后退出（req 2：PTY NN exited with xx.）
+      {
+        char pb[48];
+        snprintf(pb, sizeof pb, "PTY %02d exited with %d.", i + 1, code);
+        term::exit_prompt(pb);           // "No terminal running." + 3s→2s→1s
+      }
       if (w.ts != nullptr) { term::state_free(w.ts); w.ts = nullptr; }
       *rc = code;
       return true;
@@ -1452,6 +1579,8 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
   g_win_count = g_conf.windows;          // 槽位数（[general] windows；config 已钳位 2–32）
   if (g_win_count < 2) g_win_count = 2;
   if (g_win_count > 32) g_win_count = 32;
+  ime::set_prefs(g_conf.ime_enabled, g_conf.ime_script,
+                 g_conf.ime_custom_symbols);
   g_default_cmd = split_words(g_conf.launch);
   if (g_default_cmd.empty()) g_default_cmd.push_back("bash");
   g_prompt_cmd = g_default_cmd.front();
@@ -1484,7 +1613,7 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
     Win& w = g_wins[0];
     w.font_size = opt.font_size;
     w.ts = term::state_new(win_opt(w));
-    if (w.ts == nullptr) { fprintf(stderr, "[session] state_new failed\n"); return 1; }
+    if (w.ts == nullptr) { logf( "[session] state_new failed\n"); return 1; }
     g_cur = 0;
     use_win(0);
     // 每次启动都与"新建窗口"一致：开屏文本 + `> 启动命令`（等同用户在新建窗口
@@ -1520,9 +1649,10 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
   }
 
   if (g_wins[g_cur].ts == nullptr) {          // state_new 失败（OOM）：干净退出，由 atexit 还原显示
-    fprintf(stderr, "[session] no window state, aborting\n");
     return 1;
   }
+
+  ime_ui::attach();                            // 拼音叠加层（1.3.0-rc003）：每帧补画
 
   for (;;) {
     if (hw::exit_requested()) return 0;      // SIGINT/SIGTERM/SIGHUP：交给 atexit 还原显示
@@ -1540,7 +1670,6 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
 
     int rc = 0;
     if (check_exits(&rc)) return rc;
-
     // 输出流期间（60ms 内有数据）键盘等待不阻塞；出站有积压时也缩短等待：
     //   有进展 → 内核还有空间，1ms 快转尽快排空；
     //   无进展 → 子进程不读（输入缓冲满），5ms 等它腾空间，避免空转烧 CPU。
@@ -1567,6 +1696,10 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
       case kbd::Poll::Aux:
         break;
       case kbd::Poll::Cmd:
+        // 正在输入中文（候选词框显示中）：屏蔽一切快捷键（切换/剥离/关窗/缩放等）；
+        // 例外：Fn+空格 切中/英放行（切英文时 ime::end() 自动清空当前组词）；
+        // 长按 Esc 退出走 Quit/EscHint 通道，不受此拦
+        if (ime::composing() && cmd != kbd::Cmd::ImeToggle) break;
         term::view_follow();                       // FN 组合 = 翻页以外的键 → 跳底
         if (cmd == kbd::Cmd::Close) { close_current(); if (g_quit_after_close) return 0; }
         else if (cmd == kbd::Cmd::PrevWin) switch_to((g_cur + g_win_count - 1) % g_win_count);
@@ -1588,11 +1721,51 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
             term::toast(tb);
           }
         }
-        // Fn+Space（弹出中文输入法）：预留接线。keyboard.h 的 kbd::Cmd 目前没有
-        // Space/IME 命令（未改 keyboard.*），等键盘层新增后在此接：
-        //   else if (cmd == kbd::Cmd::ImePopup) term::toast("弹出中文输入法 (占位符)");
+        // Fn+空格 / Super+空格：切换中/英输入法（1.3.0-rc003 起真实切换组词引擎）
+        //   进入中文模式 = 动态加载 rime 引擎+词典（首次部署单 schema，用后不释放）；
+        //   引擎/数据未安装 → 提示；中文模式下再按 = 切回英文。
+        else if (cmd == kbd::Cmd::ImeToggle) {
+          if (!g_conf.ime_enabled) {
+            term::toast("中文输入已禁用");          // config [ime] enabled=no
+          } else if (ime::cn_mode()) {
+            ime::end();
+            g_ime_cn = false;
+            term::invalidate();
+            term::toast("英文输入模式");
+          } else if (ime::begin()) {
+            g_ime_cn = true;
+            term::toast("中文输入模式");
+          } else {
+            term::toast("Rime 中文输入法框架未安装");
+          }
+        }
         break;
       case kbd::Poll::Echo: {
+        Win& w = g_wins[g_cur];
+        // ── 中文输入（1.3.0-rc003）：组词/符号框按键最先进 ime ─────────
+        if (ime::cn_mode()) {
+          std::string commit;
+          const bool used = ime::handle_key(t, kev, &commit);
+          if (used) {
+            const bool sh2 = (kev.mods & 1) != 0, al2 = (kev.mods & 2) != 0, ct2 = (kev.mods & 4) != 0;
+            const bool paging2 = (t == "PgUp" || t == "PgDn" || (t == "Tab" && sh2)) && !ct2 && !al2;
+            if (!paging2) term::view_follow();      // 与普通打字一致：跳底（翻页键豁免）
+            if (!commit.empty()) {
+              // 上屏 → 会话/程序：PTY 窗口走 feed_key，启动器插入输入行并回显
+              if (w.open) feed_key(w, commit.data(), commit.size());
+              else { w.line += commit; term::write(commit.data(), commit.size()); }
+              term::cursor_reblink();
+            }
+            term::present();
+            break;
+          }
+          if (ime::composing()) {
+            // 正在输入中文：除长按 Esc（Quit 通道）外全拦；
+            // 仅放行 Ctrl/Alt 单字符控制键给 PTY（^C 等逃生口），启动器全拦
+            if (w.open && (kev.mods & 6) != 0 && t.size() == 1) send_key(w, t, kev);
+            break;
+          }
+        }
         // ── 视图跟随：手动翻页键（含松开/长按重发）豁免；
         //    其它任何按键按下即跳底（不管是否触发缓冲区写入）
         {
@@ -1616,7 +1789,6 @@ int run(const std::vector<std::string>& first_cmd, const term::Options& opt)
             break;   // 拦截：无论切换还是超限提示，都不再转发给 PTY
           }
         }
-        Win& w = g_wins[g_cur];
         if (w.open) send_key(w, t, kev);
         else launcher_key(w, t, kev);
         break;

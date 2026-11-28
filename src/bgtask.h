@@ -13,6 +13,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <sys/types.h>
 
 namespace bgtask {
@@ -22,6 +23,9 @@ std::string slot_name(int n1);
 
 // tmux 里是否已有该后台会话（tmux -L cardterm has-session）
 bool session_exists(int n1);
+
+// 一次 tmux list-sessions 枚举全部后台会话名（多槽查询用，避免逐槽 popen；rc211）
+std::vector<std::string> list_sessions();
 
 // 扫描 01..win_count，返回最小存在会话的 0 基槽位；都没有则 -1（req 8 启动扫描）
 int first_existing_session(int win_count);

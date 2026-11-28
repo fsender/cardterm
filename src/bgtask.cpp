@@ -30,6 +30,8 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <cstdint>
+#include <time.h>
 #include <unistd.h>
 
 namespace bgtask {
@@ -56,6 +58,14 @@ bool set_nonblock(int fd)
 {
   int fl = fcntl(fd, F_GETFL, 0);
   return fl >= 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0;
+}
+
+// 单调毫秒钟（自退空闲窗口用；rc219）
+uint64_t now_ms()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
 // fork + /bin/sh -c <cmd>，同步等退出；返回退出码（-1 = fork/exec 失败）
@@ -338,12 +348,12 @@ bool session_exists(int n1)
   return pclose(fp) == 0;
 }
 
-int first_existing_session(int win_count)
+std::vector<std::string> list_sessions()
 {
-  // 一次 list-sessions 枚举（避免逐个 popen）
-  FILE* fp = popen("tmux -L cardterm list-sessions -F '#{session_name}' 2>/dev/null", "r");
-  if (fp == nullptr) return -1;
+  // 一次 list-sessions 枚举（避免逐个 popen；rc211）
   std::vector<std::string> names;
+  FILE* fp = popen("tmux -L cardterm list-sessions -F '#{session_name}' 2>/dev/null", "r");
+  if (fp == nullptr) return names;
   char line[256];
   while (fgets(line, sizeof line, fp) != nullptr) {
     size_t n = strlen(line);
@@ -351,6 +361,13 @@ int first_existing_session(int win_count)
     names.push_back(line);
   }
   pclose(fp);
+  return names;
+}
+
+int first_existing_session(int win_count)
+{
+  // 一次 list-sessions 枚举（避免逐个 popen）
+  const std::vector<std::string> names = list_sessions();
   for (int i = 1; i <= win_count; i++) {
     const std::string want = slot_name(i);
     for (const auto& s : names) if (s == want) return i - 1;
@@ -360,7 +377,21 @@ int first_existing_session(int win_count)
 
 namespace {
 
-// 连接守护进程；未运行则启动（fork+setsid+exec --bgtaskd）并重试
+// 后台会话管理二进制（rc216/M1）：优先与本可执行同目录的 cardterm-bgtask
+// （deb 装 /usr/share/APPLaunch/bin/、维护部署在 ~/apps/cardterm/ 都满足）；
+// 找不到再回退本可执行（旧布局：cardterm --bgtaskd 自身）。
+std::string bgtask_exe()
+{
+  const std::string self = exe_path();
+  const size_t slash = self.rfind('/');
+  if (slash != std::string::npos) {
+    const std::string cand = self.substr(0, slash + 1) + "cardterm-bgtask";
+    if (access(cand.c_str(), X_OK) == 0) return cand;
+  }
+  return self;
+}
+
+// 连接守护进程；未运行则启动（systemd 用户单元 → 直接 fork+exec 回退）并重试
 int connect_daemon()
 {
   auto try_connect = []() -> int {
@@ -378,9 +409,27 @@ int connect_daemon()
   int fd = try_connect();
   if (fd >= 0) return fd;
 
+  // ① 用户级 systemd 总体管理（rc216/M1）：cardterm-bgtask.service（Restart=no，
+  //    守护进程/后台会话退出都不重启，行为与直拉一致）。单元缺失或用户会话
+  //    无 systemd 时 systemctl 非零退出，直接走 ②。
+  if (run_sh("systemctl --user start cardterm-bgtask.service 2>/dev/null") == 0) {
+    for (int i = 0; i < 15; i++) {
+      usleep(100000);
+      fd = try_connect();
+      if (fd >= 0) return fd;
+    }
+  }
+
+  // ② 直接拉起 cardterm-bgtask（路径/argv 全部 fork 前备好：子进程 exec 前只用
+  //    async-signal-safe 调用，防多线程 fork 死锁；M1）
+  //    双 fork 脱壳（rc218）：孙进程交 init/会话回收者收养，守护退出不给
+  //    cardterm 留僵尸；中间父由下方 waitpid 立即收割。
+  const std::string exe = bgtask_exe();
+  const char* av[3] = { exe.c_str(), "--bgtaskd", nullptr };
   pid_t pid = fork();
   if (pid == 0) {
     setsid();
+    if (fork() != 0) _exit(0);                   // 中间父立即退出
     int nd = open("/dev/null", O_RDWR);
     if (nd >= 0) {
       dup2(nd, STDIN_FILENO); dup2(nd, STDOUT_FILENO); dup2(nd, STDERR_FILENO);
@@ -390,10 +439,10 @@ int connect_daemon()
     if (open_max < 0 || open_max > 4096) open_max = 4096;
     for (int f = 3; f < (int)open_max; f++) close(f);
     // argv[0] 用完整路径：pkill -f / ps 可识别（"cardterm --bgtaskd" 模式匹配不到）
-    const std::string exe = exe_path();
-    execl("/proc/self/exe", exe.c_str(), "--bgtaskd", (char*)nullptr);
+    execv(av[0], (char* const*)av);
     _exit(127);
   }
+  if (pid > 0) { int st = 0; waitpid(pid, &st, 0); }   // 收割中间父（立即退出）
   for (int i = 0; i < 30; i++) {          // 等守护进程绑定 socket
     usleep(100000);
     fd = try_connect();
@@ -502,20 +551,40 @@ int run_daemon()
   memset(&addr, 0, sizeof addr);
   addr.sun_family = AF_UNIX;
   snprintf(addr.sun_path, sizeof addr.sun_path, "%s", g_sock_path.c_str());
-  unlink(g_sock_path.c_str());                 // 陈旧 socket
-  if (bind(lfd, (struct sockaddr*)&addr, sizeof addr) != 0 || listen(lfd, 8) != 0) {
+  // 绑定竞态防护（rc220/L14）：unlink+bind 原本非原子——两个守护同时首拉时
+  // 后启动者会删掉先启动者刚绑定的 socket 造成互踩/孤儿。改为：先 bind；
+  // EADDRINUSE 时先探测既有守护（活着 = 本方让位正常退出），仅当确认是
+  // 陈旧 socket 文件才 unlink 重试；lstat 闸门兼防 /tmp 回退目录里被栽的
+  // 非 socket 文件被误删（竞态面收敛）。
+  bool bound = false;
+  for (int attempt = 0; attempt < 2 && !bound; attempt++) {
+    if (bind(lfd, (struct sockaddr*)&addr, sizeof addr) == 0) { bound = true; break; }
+    if (errno != EADDRINUSE) break;
+    int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (probe >= 0) {
+      const bool alive = connect(probe, (struct sockaddr*)&addr, sizeof addr) == 0;
+      close(probe);
+      if (alive) { close(lfd); dlog("[daemon] another daemon alive, yield"); return 0; }
+    }
+    struct stat st;
+    if (lstat(g_sock_path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode)) unlink(g_sock_path.c_str());
+    else break;
+  }
+  if (!bound || listen(lfd, 8) != 0) {
     close(lfd);
     return 1;
   }
   chmod(g_sock_path.c_str(), 0600);
 
-  int empty_ticks = 0;
+  uint64_t empty_since = now_ms();
   for (;;) {
-    // 无托管会话持续 5s → 自动退出（刚启动时给 PARK 留接入窗口）
+    // 无托管会话持续 5s → 自动退出（刚启动时给 PARK 留接入窗口）。
+    // 空闲窗口按墙钟计（rc219）：循环体内的阻塞工作（死亡记录的退出码轮询/
+    // tmux 捕获）不再把"5 个 tick"拉长成十几二十秒。
     if (g_sess.empty()) {
-      if (++empty_ticks > 5) { dlog("[daemon] idle exit"); break; }
+      if (now_ms() - empty_since > 5000) { dlog("[daemon] idle exit"); break; }
     } else {
-      empty_ticks = 0;
+      empty_since = now_ms();
     }
 
     std::vector<struct pollfd> pfds;

@@ -3,13 +3,18 @@
 // 路径：~/.config/cardterm/config.ini（缺省时自动创建默认样例）
 // 默认样例（每一项都带英文注释，见 config.cpp 的 kDefaultIni）：
 //   [general]
-//   launch=bash                 # 启动命令（留空 = 显示启动器）
+//   launch=<登录 shell>         # 启动命令（默认 = 用户默认可交互 shell；留空 = 显示启动器）
 //   cwd=home                    # 启动工作目录（home/~/$HOME = 家目录；留空 = 继承）
 //   windows=12                  # 终端窗口槽位数（2–32，默认 12）
 //   unicode=yes                 # 是否向程序宣称 Unicode（no → LANG=C，TUI 走 ACS 框线）
 //   full_line_newline=no        # 满宽行 + LF 语义（no = xterm/vt.c 行为）
 //   toast=yes                   # 事件通知（toast 叠加层）开关
 //   toast_ms=2000               # toast 显示时长 ms（200–60000，超出钳位）
+//
+//   [ime]                       # 中文输入（拼音 / RIME），详见 kDefaultIni 注释
+//   enable_zh_cn_input=true     # 中文输入功能开关（false = 禁用）
+//   simplified_traditional=all  # all 不转换（默认）/ simplified 仅简体 / traditional 仅繁体
+//   custom_symbols=             # i 符号框自定义符号串（空 = 内置全角表；上限 891 个）
 //
 //   [font]
 //   font_size=6                 # 初始字号：4 = 4x7，6 = 6x10（默认），8 = 8x14
@@ -19,27 +24,59 @@
 //   #background_image=…         # 背景图（注释状态，提供图片后自行启用）
 //   #cursor=…                   # 光标色（注释状态；缺省跟随 bright7）
 //   regular0…7 / bright0…7      # 16 色调色板（foot 默认配色）
+//   popup_bg_color / popup_border_color / popup_text_color
+//                               # 三框共用配色方案（toast/拼音框/退出提示；调色板
+//        槽位名或 RRGGBB；留空 = 默认 bright0/bright4/bright7）
+//   #toast_* / #prompt_* / #ime_*  # 单框细化配色（注释状态：未配置 = 沿用
+//        popup_* 方案；边框建议用较亮较鲜艳的彩色）
 //
 //   [scrollback]
 //   lines=2000                  # 最大回滚行数（100–30000；低于 100 按 100，超限钳到 30000）
 //   hold_ms=2000                # 手动翻页后保持不跳底时长（上限 60000，超限钳位）
 //
 //   [background]
-//   buffer_kb=256               # 后台会话恢复贴回文本上限 KB（16–1048576，默认 256）
+//   buffer_kb=256               # 后台会话恢复贴回文本上限 KB（16–4096=4MB 上限，默认 256）
 //
 //   [text]
-//   splash=                     # 开屏文本（空 = 内置默认；颜色标签语法见 session.cpp）
+//   splash=                     # 开屏文本（空 = 不显示任何提示文本；颜色标签语法见 session.cpp）
 #pragma once
 
 #include <cstdint>
 #include <string>
 
+#include "ime.h"   // ime::Script（[ime] simplified_traditional 取值）
+
 namespace cfg {
+
+// toast / 全屏提示框 / 输入法框 配色（[colors] popup_* / toast_* / prompt_* / ime_*）：
+// 0 = 未配置 → 用默认 bright 色系（与旧行为一致）。
+// popup_* 三色 = 三框共用配色方案（toast、拼音框、退出全屏提示）：
+// 取值为调色板槽位名（regular0-7 / bright0-7，绘制时按当前调色板动态解析）或
+// RRGGBB 十六进制；留空 = 默认 bright0 底 / bright4 边框 / bright7 文字。
+// 编码：0=未配置；RGB888=固定色；kUiPalFlag|idx=调色板槽位。
+// 各框专用键（toast_* / prompt_* / ime_*，仅 RRGGBB）仍可对单框细化覆盖。
+constexpr uint32_t kUiPalFlag = 0x01000000u;
+struct UiColors {
+  uint32_t popup_bg = 0, popup_border = 0, popup_text = 0;   // [colors] popup_*_color
+  uint32_t toast_bg = 0, toast_border = 0, toast_text = 0;
+  uint32_t prompt_bg = 0, prompt_border = 0, prompt_text = 0;
+  uint32_t ime_bg = 0, ime_border = 0, ime_text = 0;
+  uint32_t ime_sel_bg = 0, ime_sel_text = 0;
+  uint32_t ime_status_bg = 0, ime_status_text = 0;
+  uint32_t ime_compose = 0;
+  // 半透明（[colors] toast_prompt_transparency / ime_transparency，0–90）：
+  // 0 = 不透明（默认，快速路径不建画布）；越高越透（上限 90，再高就看不到了）
+  int toast_prompt_transparency = 0;   // toast + 全屏提示（同一值）
+  int ime_transparency = 0;            // 拼音输入框（含无候选提示框）
+};
 
 struct Config {
   uint32_t    bg_color  = 0x212421;  // 默认背景色（RGB888，foot 242424）
   uint32_t    cursor_color = 0;      // 光标颜色 RGB888（0 = 同 bright7）
   std::string bg_image;              // 背景图路径（空 = 纯色背景）
+  int         bg_image_transparency = 0; // 背景图透明度（[colors] background_image_transparency，
+                                     //   0–90；0=直接显示背景图（默认，快速路径），
+                                     //   越高背景图越黯淡、背景色越明显）
   uint32_t    palette[16] = {        // ANSI 16 色 RGB888（regular0-7 + bright0-7，foot 默认）
     0x212421, 0xF7285A, 0x42B610, 0xE7C700, 0x21AED6, 0xF7AEFF, 0x10C39C, 0xE7E7E7,
     0x636163, 0xFF4D52, 0x31D752, 0xEFEB31, 0x5AC7FF, 0xFFAAF7, 0x21DFC6, 0xFFFFFF,
@@ -66,12 +103,22 @@ struct Config {
                                     //   （每个窗口都可用 FN+U/I 单独调整）
   int         windows = 12;         // 终端窗口槽位数（[general] windows；2–32，超出钳位）
   int         bg_buffer_kb = 256;   // 后台会话恢复时贴回的输出文本上限（KB；
-                                    //   [background] buffer_kb，16–1048576，超出钳位）
+                                    //   [background] buffer_kb，16–4096（4MB 上限），超出钳位）
+  // ── [ime] 中文输入（拼音）子系统 ─────────────────────────────
+  bool        ime_enabled = true;       // enable_zh_cn_input：功能开关（默认启用）
+  ime::Script ime_script = ime::Script::All;
+                                        // simplified_traditional：all 不转换（默认）/
+                                        //   simplified 仅简体 / traditional 仅繁体；
+                                        //   首次生成 rime 用户配置用，之后以 rime 配置文件为准
+  std::string ime_custom_symbols;       // custom_symbols：`i` 符号框自定义符号串
+                                        //   （每字符一个符号，上限 891 个；空 = 内置全角表）
   // 开屏页自定义文本（[text] splash）：
   //   空 = 用内置默认内容。语法只解析颜色标签，见 session.cpp emit_rich_text：
   //   <br> 换行；<fgcolor=RRGGBB>…</fgcolor>；<bgcolor=RRGGBB>…</bgcolor>；
   //   未闭合的颜色标签生效到末尾；不合法的标签原样显示。
   std::string splash;
+  // toast / 全屏提示框 / 输入法框 配色覆盖（0 = 默认 bright 色系）
+  UiColors    ui;
 };
 
 // 读取 ~/.config/cardterm/config.ini；文件不存在时写入默认样例。

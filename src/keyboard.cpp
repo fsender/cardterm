@@ -31,6 +31,7 @@
 //     调用方弹 toast），按住 2s → Quit；中途松开不产生任何事件（提示由调用方自然
 //     消失）；短按（<0.5s）按/松成对上报，回显 "Esc"
 #include "keyboard.h"
+#include "log.h"
 #include "applaunch_env.h"
 
 #include <atomic>
@@ -147,7 +148,6 @@ void load_keymap(const char* path)
 {
   FILE* f = fopen(path, "r");
   if (!f) {
-    fprintf(stderr, "[kbd] keymap %s -> %s (builtin fallback)\n", path, strerror(errno));
     return;
   }
   char line[256];
@@ -161,7 +161,6 @@ void load_keymap(const char* path)
     g_sym_map[g_sym_n++] = { (uint16_t)code, ch };
   }
   fclose(f);
-  fprintf(stderr, "[kbd] keymap %s: %d entries loaded\n", path, g_sym_n);
 }
 
 // 符号层键码 → 字符；0 = 非符号层键。注入 map 优先，内置表兜底。
@@ -406,8 +405,6 @@ void poll_mods()
       if (m.used) {
         m.one_shot = false;
         m.stale    = true;
-        fprintf(stderr, "[kbd] late one-shot (%s): already used by a key, discarded\n",
-                kModNames[i]);
       } else {
         m.one_shot = true;
         m.stale    = false;
@@ -661,6 +658,7 @@ void process_external(Dev& d, int slot, const struct input_event& ev)
         case KEY_Q:                 c = Cmd::Close;    break;
         case KEY_A:                 c = Cmd::Detach;   break;
         case KEY_H:                 c = Cmd::ShowHelp; break;
+        case KEY_SPACE:             c = Cmd::ImeToggle; break;   // Super+空格=中/英输入
         default:
           if (code >= KEY_F1 && code <= KEY_F10)
             c = (Cmd)((int)Cmd::Win1 + (code - KEY_F1));
@@ -674,7 +672,7 @@ void process_external(Dev& d, int slot, const struct input_event& ev)
       switch (code) {
         case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
         case KEY_W: case KEY_E: case KEY_U: case KEY_I: case KEY_Q:
-        case KEY_A: case KEY_H:
+        case KEY_A: case KEY_H: case KEY_SPACE:
         case KEY_F1: case KEY_F2: case KEY_F3: case KEY_F4: case KEY_F5: case KEY_F6:
         case KEY_F7: case KEY_F8: case KEY_F9: case KEY_F10: case KEY_F11: case KEY_F12:
           return;
@@ -785,8 +783,6 @@ void scan_external()
         if (g_ignored[i] == st.st_rdev) { seen = true; break; }
       if (!seen) {
         if (g_ignored_n < kMaxExtDevs) g_ignored[g_ignored_n++] = st.st_rdev;
-        fprintf(stderr, "[kbd] too many external keyboards (max %d), ignored: %s\n",
-                kMaxExtDevs, path);
       }
       ::close(fd);
       continue;
@@ -803,9 +799,6 @@ void scan_external()
     d.standard = true;
     d.rdev = st.st_rdev;
     g_ext_n++;
-    fprintf(stderr, "[kbd] external keyboard: %s bustype=0x%02x name=%s%s\n",
-            path, (unsigned)bustype, name.c_str(),
-            grabbed ? "" : " (EVIOCGRAB failed, read-only)");
   }
   closedir(dir);
 }
@@ -980,8 +973,6 @@ void process(const struct input_event& ev)
       if (base != 0 && base != rx_code) {
         code = base;
         remember_restore(rx_code, code);
-        fprintf(stderr, "[kbd] late one-shot: scan=0x%02x remapped %u -> base %u\n",
-                (unsigned)(scan & 0xff), (unsigned)rx_code, (unsigned)code);
       }
     }
   } else if (val == 0) {
@@ -1041,6 +1032,14 @@ void process(const struct input_event& ev)
       case KEY_BRIGHTNESSUP:  c = Cmd::FontUp;   break;
       case KEY_MUTE:          c = Cmd::Detach;   break;
       case KEY_HELP:          c = Cmd::ShowHelp; break;
+      // Fn+空格：切换中/英输入。keymap2 对 Space 维持 KEY_SPACE（与裸空格同码），
+      // 只能靠 Fn 修饰状态（按住/One-shot/锁定）区分——裸空格照常回显。
+      case KEY_SPACE:
+        if (mod_effective(kModFn)) {
+          consume_one_shot();                 // 消费 Fn One-shot 令牌（同普通字符键）
+          c = Cmd::ImeToggle;
+        }
+        break;
       default: break;
     }
     if (c != Cmd::None) {
@@ -1149,8 +1148,6 @@ void reader_loop()
         // 设备消失（ENODEV/EOF 等）：只关这一个 fd，其它设备继续工作
         const char* reason = (n == 0) ? "EOF" : strerror(errno);
         if (slot < 0) {
-          fprintf(stderr, "[kbd] primary keyboard lost: %s (%s)\n",
-                  g_primary.path.c_str(), reason);
           const bool was_standard = g_primary.standard;
           close_dev(g_primary);
           if (!was_standard) {                 // 板载：清掉重发/Esc 计时，避免幽灵重发
@@ -1160,7 +1157,6 @@ void reader_loop()
             g_esc_hinted = false;
           }
         } else {
-          fprintf(stderr, "[kbd] external keyboard lost: %s\n", g_ext[slot].path.c_str());
           close_dev(g_ext[slot]);
           dead_ext[slot] = true;
         }
@@ -1217,7 +1213,6 @@ void reader_loop()
   }
 
   if (g_primary.fd < 0 && g_ext_n == 0 && !g_lost.load(std::memory_order_acquire)) {
-    fprintf(stderr, "[kbd] all keyboard devices lost, input thread exit\n");
     g_lost.store(true, std::memory_order_release);   // 通知 session：干净退出而非死键盘
   }
 }
@@ -1257,7 +1252,6 @@ bool open_primary(const char* path, bool explicit_env)
 {
   int fd = ::open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0) {
-    if (explicit_env) fprintf(stderr, "[kbd] open %s -> %s\n", path, strerror(errno));
     return false;
   }
   struct stat st {};
@@ -1270,7 +1264,6 @@ bool open_primary(const char* path, bool explicit_env)
 
   const bool coop = applaunch_env::coop_managed();
   if (!coop && ioctl(fd, EVIOCGRAB, 1) < 0) {  // 独占：按键不泄漏给控制台/其他进程
-    fprintf(stderr, "[kbd] EVIOCGRAB %s -> %s\n", path, strerror(errno));
     ::close(fd);
     return false;
   }
@@ -1282,9 +1275,6 @@ bool open_primary(const char* path, bool explicit_env)
   g_primary.bustype  = bustype;
   g_primary.standard = standard;
   g_primary.rdev     = st.st_rdev;
-  fprintf(stderr, "[kbd] open %s -> ok%s (bustype=0x%02x name=%s layout=%s%s)\n",
-          path, explicit_env ? "" : " (auto)", (unsigned)bustype, name.c_str(),
-          standard ? "standard-US" : "onboard", coop ? ", shared" : "");
   return true;
 }
 
@@ -1314,7 +1304,7 @@ bool open()
     for (int i = 0; i < 3 && g_primary.fd < 0; i++)
       if (paths[i] != nullptr) open_primary(paths[i], false);
   }
-  if (g_primary.fd < 0) { fprintf(stderr, "[kbd] no device\n"); return false; }
+  if (g_primary.fd < 0) { logf( "[kbd] no device\n"); return false; }
 
   // 修饰状态源只对板载键盘有意义：外接键盘的 Shift/Ctrl/Alt 由 evdev 事件维护，
   // 板载的 Shift/Fn/Sym 三态才需要读内核 FSM（sysfs / i2c / 测试接缝）。

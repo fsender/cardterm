@@ -21,6 +21,8 @@ $SSHP ssh -o ConnectTimeout=5 -n $PI 'echo SSH_OK' >/dev/null 2>&1 || { echo "bo
 echo "== 2. push binary -> ~/apps/cardterm/cardterm =="
 $SSHP ssh -n $PI 'mkdir -p '"$DIR"
 $SSHP scp -q $BIN $PI:$DIR/cardterm
+# 后台会话管理小二进制（rc216/M1）：与主程序同目录，cardterm 按需拉起
+[ -x build-debug/cardterm-bgtask ] && $SSHP scp -q build-debug/cardterm-bgtask $PI:$DIR/cardterm-bgtask
 
 echo "== 3. run (独占会话, 自动退出) =="
 $SSHP ssh -n $PI "cd $DIR && ./cardterm 2>&1; echo 'app exit code: '$?"

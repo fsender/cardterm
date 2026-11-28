@@ -16,10 +16,12 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "config.h"      // cfg::UiColors（toast/提示框/输入法框配色覆盖）
+
 namespace term {
 
 // 缓冲区上限（供更小字体形式使用；实际网格由 state_new 按字体参数计算）
-constexpr int kMaxCols = 80;        // 列上限（5px 包围框 → 320/5 = 64）
+constexpr int kMaxCols = 80;        // 列上限（最小字格 4px：320/4 = 80）
 constexpr int kMaxRows = 32;        // 行上限（s_dirty 为 32 位）
 
 // 运行时网格/单元尺寸（由激活窗口的字号决定，见 apply_grid/activate）
@@ -31,6 +33,8 @@ extern int kCellH;                  // 单元高（字号 4/6/8 → 7/10/14）
 struct Options {
   uint32_t     bg_color   = 0x000000; // 默认背景色（RGB888）
   const char*  bg_image   = nullptr;// 背景图路径（空 = 纯色背景）
+  int          bg_image_transparency = 0; // 背景图透明度 0–90（0=直接显示背景图，
+                                    //   越高背景图越黯淡、背景色越明显）
   const uint32_t* palette16 = nullptr; // ANSI 16 色 RGB888（空 = 内置）
   uint32_t     cursor_color = 0; // 光标颜色 RGB888（0 = 同 bright7；config cursor）
   int          view_hold_ms = 2000; // 手动翻页后保持不跳底的时长（ms）
@@ -38,6 +42,7 @@ struct Options {
   bool         unicode    = true;   // 向子进程宣称 Unicode（UTF-8 locale）；false → LANG=C
   int          font_size   = 6;     // 初始字号：4 = 4x7，6 = 6x10（默认），
                                     //   8 = 8x14（暂用 6x10 字形）；每个窗口可单独调整
+  cfg::UiColors ui;                 // toast/提示框/输入法框配色覆盖（0 = 默认 bright 色系）
 };
 
 void init(const Options& opt);      // 画布+清屏；默认光标 (0,0)
@@ -93,8 +98,9 @@ void scroll_view(int delta);        // 翻看回滚：>0 更旧，<0 更新（�
 
 // ── toast 叠加层（LovyanGFX 层自定义合成）────────────────────────────
 // 屏幕最上方水平居中的圆角提示条，与终端网格/字号无关：
-//   - 几何：上边距 10px、总高 32px（含 2px 无 AA 边框）、圆角半径 6px、内部可视区 28px；
-//           宽度 = 文本宽 + 左右内边距各 12px + 边框 4px，上限屏宽（超宽截断文本）；
+//   - 几何：上边距 14px、总高 24px（含 2px 无 AA 边框）、外圆角 8px / 内圆角 6px
+//           （r8 样式）、内部可视区 20px；
+//           宽度 = 文本宽 + 左右内边距各 7px + 边框 4px，上限屏宽（超宽截断文本）；
 //   - 字体：固定 8×14（termfont::font_8x14），文字在内部区垂直/水平居中，中文双宽；
 //   - 颜色：取当前窗口 16 色调色板 —— 背景 bright0(pal[8])、边框 bright4(pal[12])、
 //           文字 bright3(pal[11])，经 to565 转 RGB565；
@@ -103,10 +109,12 @@ void scroll_view(int delta);        // 翻看回滚：>0 更旧，<0 更新（�
 //   （既有 toast(text, 2000) 调用行为不变）；<=0（含默认参数 0）= 用
 //   set_toast_default_ms() 配置的默认时长（未配置时 2000ms）。
 void toast(const char* text, int ms = 0);
-// 全屏倒计时退出提示（剥离/关闭最后一个窗口时用）：14px 边距、2px 边框、
-// 三行文本居中；第三行随秒显示 3s→2s→1s，随后返回（调用方退出程序）。
-// line1 为场景文案（如 "Detached PTY 03." / "PTY 03 closed."），第二行固定
-// "No terminal running."。独立于终端状态绘制（窗口已关闭、T 可能为空）。
+// 全屏倒计时退出提示（剥离/关闭最后一个窗口、末窗程序自然退出时用）：
+// 42px 上下 / 32px 左右边距的圆角提示框，toast 同款渲染，直接叠在终端内容上
+// （边缘透出之前的输出）；显示前清除屏上 toast，同屏不再出现 toast。
+// 三行文本居中；第三行 "cardterm will exit in Ns." 逐秒重绘 3→2→1 后返回。
+// line1 为场景文案（如 "PTY 03 exited with 0." / "Detached PTY 03."），第二行固定
+// "No terminal running."。叠加渲染不依赖终端状态（窗口已关闭、T 可能为空）。
 void exit_prompt(const char* line1);
 // 设置 toast 默认停留时长（进程级）：toast(text)/toast(text, 0) 由此取值；
 // ms<=0 时按 2000 兜底。只影响此后新建的 toast。
@@ -117,5 +125,60 @@ bool toast_active();                // 屏上当前是否有 toast（供 session
 // ── 会话与窗口关闭语义（与普通电脑关闭终端窗口一致）──────────────
 void attach_process(long pid);      // 登记前台子进程（shell/PTY 挂接点）
 void close_window();                // SIGHUP → 宽限 → SIGKILL → 返回
+
+// ── 叠加层扩展（1.3.0-rc003 拼音候选框；只增不改，旧路径不受影响）──
+// 光标所在格（0-based 列/行）：拼音编辑行/候选框定位用
+void cursor_cell(int* col, int* row);
+// 配置调色板第 idx 项（0..15，RGB888）。不含 OSC4 动态色：拼音叠加层
+// 不受终端程序控制（色彩取配置项，同 toast/全屏横幅的色彩配置来源）
+uint32_t pal_config(int idx);
+// toast/全屏横幅共用的三色（RGB888）：toast_* 覆盖优先，否则当前窗口
+// 调色板 bright0/4/7（含 OSC4 动态色，与 toast 渲染同源）。拼音框三色
+// 角色（白=文字/高亮底、暗=框底/高亮字、蓝=边框/Tab 底）取自这里，
+// 保证与 toast/全屏横幅永远一致。
+void ui_chrome_colors(uint32_t* bg, uint32_t* border, uint32_t* fg);
+// 合帧补画钩子：present_now() 在终端行/光标合成之后、toast 之前调用。
+// 图层规范（低→高）：终端内容 → toast → 拼音输入框 → 全屏提示框；
+// 拼音候选框/编辑行注册后每帧压在 toast 之上、全屏提示框之下
+void set_overlay_hook(void (*fn)());
+// 按像素行范围标脏（换算成字符行）：叠加层消失/移动时擦除残影用。
+// 标脏后由 tick()/maybe_present 的正常合帧路径重画这些行
+void mark_pixel_rows(int py0, int py1);
+// toast/提示框/输入法框 配色覆盖（0 = 默认 bright 色系；config [colors]）
+const cfg::UiColors& ui_colors();
+// 文本原语（字体表只在 terminal.cpp 一份，叠加层共用；行内全半角逐码点判格数）：
+//   text_cells814  — 8x14 表测宽（格数；cap_cells>0 时按格截断，不切半格）
+//   draw_text814   — 8x14 文本；opaque=true 铺 bg 后点字形一次上屏，false 只画墨迹
+//   draw_text_ink_win — 窗口字号（4x7/6x10/8x14）只画墨迹，超出屏幕右缘不画
+//   text_px610 / draw_text610 — 6x10 小字（拼音状态行 N/M Tab 用；测宽为像素）
+//   toast_box_size / toast_box_at — toast 外观提示框（24px 高 r8 + 2px 边框 +
+//     8x14 文本，排版渲染与 toast 同口径）画在指定左上角；三色由调用方给
+int  text_cells814(const char* utf8, int cap_cells);
+void draw_text814(int x, int y, const char* utf8, uint32_t fg, uint32_t bg,
+                  bool opaque, int cap_cells);
+void draw_text_ink_win(int x, int y, const char* utf8, uint32_t fg, int cap_cells);
+int  text_px610(const char* utf8);
+void draw_text610(int x, int y, const char* utf8, uint32_t fg, uint32_t bg, bool opaque);
+int  text_px4x7(const char* utf8);
+void draw_text4x7(int x, int y, const char* utf8, uint32_t fg, uint32_t bg, bool opaque);
+void toast_box_size(const char* utf8, int* w, int* h);
+void toast_box_at(int x, int y, const char* utf8, uint32_t bg, uint32_t border, uint32_t fg);
+
+// ── 半透明窗口合成（魔数蒙版模型；toast/全屏提示/输入候选框共用口径）────
+// 画布 = 一只双半幅 LGFX_Sprite（w×2h 的 16 位 RGB565）：上半 = 画布1（内容
+// 层：魔数填充 = 透明区标记，UI 经 ov_dst() 以 (0,0) 原点画在其上）；下半 =
+// 画布2（合成暂存）。内容不变期间常驻复用，不随屏幕更新重画。
+//   ov_begin(x, y, w, h, transparency, content_sig, magic)：
+//     true = 内容需重画（调用方把 UI 画进画布1）；false = 本轮跳过绘制。
+//     仅当"屏幕更新与叠加层行相交"或"内容指纹变化"才进入合成。
+//   ov_end()：被盖行先重合成干净底，画布2 读屏 → 画布1 非魔数像素按透明度
+//     混合进画布2（魔数像素不拷、原样透出）→ 画布2 整块回屏。
+//   ov_magic(base, avoid, n)：魔数色 = 默认底色 565 值 +1（溢出回绕），与
+//     叠加层用色（avoid）撞车则继续 +1。
+// transparency 0 = 不透明快速路径：不建画布，ov_dst() 直指屏幕每帧直绘
+// （与 rc200 一致），ov_begin 恒返回 true、ov_end 为空操作。
+uint16_t ov_magic(uint16_t base, const uint16_t* avoid, int n);
+bool ov_begin(int x, int y, int w, int h, int transparency, uint32_t content_sig, uint16_t magic);
+void ov_end();
 
 }  // namespace term

@@ -37,8 +37,11 @@
 #include <signal.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <pwd.h>
 #include <unistd.h>
 #include <malloc.h>
 
@@ -701,21 +704,55 @@ bool probe_dims(const char* path, int* w, int* h)
   return false;
 }
 
-bool load_image_to_canvas(const char* path)
+static inline uint16_t to565(uint32_t col);   // 前置（定义见下）
+
+// 屏幕像素内存直读：/dev/fb0 只读 mmap，逐行小排 memcpy（fb 即 RGB565）。
+// LGFX 的 readRect 在本平台 fb 面板上读不到内容（实测全黑），故按内存操作直读。
+static uint16_t* s_fbmem = nullptr;
+static void fb_mem_init()
+{
+  if (s_fbmem != nullptr) return;
+  const int fd = open("/dev/fb0", O_RDONLY);
+  if (fd < 0) return;
+  void* p = mmap(nullptr, (size_t)kCanvasW * kCanvasH * 2, PROT_READ, MAP_SHARED, fd, 0);
+  close(fd);
+  if (p == MAP_FAILED) return;
+  s_fbmem = (uint16_t*)p;
+}
+void fb_read_rect(int x, int y, int w, int h, uint16_t* dst)
+{
+  fb_mem_init();
+  if (s_fbmem == nullptr) { memset(dst, 0, (size_t)w * h * 2); return; }
+  for (int r = 0; r < h; r++)
+    memcpy(dst + (size_t)r * w, s_fbmem + (size_t)(y + r) * kCanvasW + x,
+           (size_t)w * 2);
+}
+
+// RGB565 按透明度混合（t = 透明度 0–90：0 = 不透明直接取新像素；越高原像素权重越大）
+static inline uint16_t mix565(uint16_t o, uint16_t n, int t)
+{
+  if (t <= 0) return n;
+  const int inv = 100 - t;
+  const int r = ((o >> 11) * t + (n >> 11) * inv) / 100;
+  const int g = (((o >> 5) & 63) * t + ((n >> 5) & 63) * inv) / 100;
+  const int b = ((o & 31) * t + (n & 31) * inv) / 100;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+bool load_image_to_canvas(const char* path, int transparency)
 {
   // 仅支持 PNG / JPG（BMP 已移除）
   const char* ext = strrchr(path, '.');
   bool is_jpg = ext && (!strcasecmp(ext, ".jpg") || !strcasecmp(ext, ".jpeg"));
   bool is_png = ext && !strcasecmp(ext, ".png");
   if (!is_jpg && !is_png) {
-    fprintf(stderr, "[term] unsupported image (need png/jpg): %s\n", path);
     return false;
   }
 
   int iw = 0, ih = 0;
   probe_dims(path, &iw, &ih);
-  fprintf(stderr, "[term] image %s probe %dx%d\n", path, iw, ih);
-  if (iw <= 0 || ih <= 0 || iw * ih > 8000000) return false;   // 8MP 上限
+  if (iw <= 0 || ih <= 0 || (long long)iw * ih > 8000000) return false;   // 8MP 上限（64 位乘法防 int 回绕）
+  if (iw > 8192 || ih > 8192) return false;   // 单边钳位：防 iw+2/分配尺寸计算回绕（M3）
 
   // ① 【内存顺序·防碎片】长生命周期的画布(s_canvas 320×170×2B)已在
   //    init() 中首先分配；这里紧接着分配文件读取内存，不插任何小块。
@@ -745,7 +782,6 @@ bool load_image_to_canvas(const char* path)
       ? img.drawJpg(mem.get(), (uint32_t)rd, 1, 1, 0, 0, 0, 0, 1.0f, 1.0f)
       : img.drawPng(mem.get(), (uint32_t)rd, 1, 1, 0, 0, 0, 0, 1.0f, 1.0f);
   mem.reset();   // 解码完成 → 立即释放文件读取内存（全过程唯一常驻的是画布）
-  fprintf(stderr, "[term] decode %s\n", ok ? "ok" : "FAILED");
   if (!ok) { img.deleteSprite(); return false; }
 
   // ④ 拉伸缩放到 320×170（不考虑长宽比），开抗锯齿
@@ -773,7 +809,15 @@ bool load_image_to_canvas(const char* path)
     uint16_t* bp = (uint16_t*)dst.getBuffer();
     size_t n = (size_t)kCanvasW * kCanvasH;
     for (size_t i = 0; i < n; i++) bp[i] = (uint16_t)((bp[i] >> 8) | (bp[i] << 8));
-    fprintf(stderr, "[term] AA out swapped, px(0,0)=%04x\n", bp[0]);
+    }
+  // 背景图透明度（[colors] background_image_transparency，0–90）：在缩放结果上
+  // 叠一层背景色——值越高背景图越黯淡、背景色越明显（0 = 直接显示背景图快速
+  // 路径）。在字节交换之后按主机序混色（与 tft.pushImage 读取口径一致）。
+  if (transparency > 0) {
+    const uint16_t bgc = to565(T->s_bg);
+    uint16_t* bp = (uint16_t*)dst.getBuffer();
+    const size_t n = (size_t)kCanvasW * kCanvasH;
+    for (size_t i = 0; i < n; i++) bp[i] = mix565(bgc, bp[i], transparency);
   }
   memcpy(s_canvas_master.get(), dst.getBuffer(), (size_t)kCanvasW * kCanvasH * 2);
   dst.deleteSprite();
@@ -1112,6 +1156,7 @@ static uint32_t resolve_col(State* s, uint32_t w, bool fg_channel)
 // 恢复：toast_clear_region() 把 toast 覆盖到的屏幕行标脏后立即合帧重画（同一
 // paint_row 合成路径 + 光标），不做像素级局部擦除。
 static void toast_paint();              // 前置（定义见 present_now 之后）
+static uint32_t s_frame_painted = 0;    // 本帧已重画行位图（present_core 记账；叠加层判行相交）
 
 // 上屏：把攒下的脏行一次画出，光标画在最上层。
 // 逐字符只标脏不画像素；绘制次数由帧率决定，与输出字符数无关。
@@ -1121,13 +1166,14 @@ static void toast_paint();              // 前置（定义见 present_now 之后
 // 任何相位下屏上最多一个方块；记录失真（tick 旧实现只画不记）曾导致旧方块残留。
 static void present_core()
 {
+  s_frame_painted = 0;                             // 本帧已重画行记账（叠加层判行相交）
   if (T->s_view != 0 && T->s_view_pending && now_ms_() >= T->s_view_hold_until)
     view_follow_now();                           // 保持期结束：跳回底部
   T->s_last_present = now_ms_();
   if (T->s_view != T->s_shown_view) mark_all();            // 视图切换：行→内容映射变了，整屏重画
   T->s_shown_view = T->s_view;
   if (T->s_view != 0) {                                // 回滚视图：有变化整屏重画，不画光标
-    if (T->s_dirty) { redraw_view(); T->s_dirty = 0; }
+    if (T->s_dirty) { redraw_view(); T->s_dirty = 0; s_frame_painted = 0xFFFFFFFFu; }
     cursor_forget();                                   // 视图里没有光标（回到底部时再画）
     return;
   }
@@ -1144,7 +1190,9 @@ static void present_core()
     // 没有待画内容：屏上光标已正确 → 整帧无变化；只有"该有却没有"才补画该行
     if (!need_cursor || T->s_cur_drawn_row >= 0) return;
     paint_row(T->s_row);                               // 该格按最新屏缓冲重新合成
+    s_frame_painted |= 1u << T->s_row;
   } else {
+    s_frame_painted |= T->s_dirty;
     for (int y = 0; y < kRows; y++)
       if (T->s_dirty & (1u << y)) paint_row(y);
   }
@@ -1161,6 +1209,8 @@ static void present_core()
 // send_key 调 cursor_reblink），都立即回到"亮点相"并重启 400ms 计时。
 // 本函数在 tick() 与 present_now() 顶部各调一次：任何输出路径造成的移动都会在
 // 下一帧被发现并复位（与按键复位不冲突，都是同一 reset 语义）。
+static void (*s_overlay_hook)() = nullptr;   // 1.3.0-rc003 拼音叠加层补画钩子
+static cfg::UiColors s_ui;                   // UI 配色覆盖（0 = 默认 bright 色系）
 static void blink_track()
 {
   if (T->s_bl_r == T->s_row && T->s_bl_c == T->s_col && T->s_bl_vis == T->s_cursor_vis) return;
@@ -1168,22 +1218,132 @@ static void blink_track()
   cursor_reblink();
 }
 
+// 图层规范（低 → 高）：终端内容 → toast → 拼音输入框 → 全屏提示框。
 void present_now()
 {
   blink_track();
   present_core();
-  toast_paint();
+  toast_paint();                          // toast：位于拼音输入框之下
+  if (s_overlay_hook) s_overlay_hook();   // 常驻叠加层（拼音候选框/编辑行）：压在 toast 之上
+}
+
+// ── 半透明窗口合成（魔数蒙版模型；流程见 terminal.h）────────────────
+// 画布 = 一只双半幅 LGFX_Sprite（w × 2h 的 16 位 RGB565）：上半 = 画布1
+// （内容层：先填魔数色 = 透明区标记，UI 以 (0,0) 原点画在其上，绘制代理平移
+// 屏幕坐标；内容不变期间常驻复用，不随屏幕更新重画）；下半 = 画布2（合成
+// 暂存：读入屏幕当前像素 → 画布1 非魔数像素按透明度混合进来（魔数像素不
+// 拷，原样透出）→ 整块回屏）。仅在屏幕更新与叠加层行相交或内容变化时合成。
+// 透明度 0 = 不透明快速路径（直绘屏幕）。
+constexpr int kOvMaxW = 320;
+constexpr int kOvMaxH = 90;                        // 叠加层尺寸上限（toast 24 / 输入框 79 / 提示 86）
+static lgfx::LGFX_Sprite* s_ov_color = nullptr;    // 画布1（懒建；尺寸缓存）
+static int s_ov_sw = 0, s_ov_sh = 0;               // 画布1 当前尺寸
+// 画布2 = 同一只精灵的下半幅（w × 2h 的下半 h 行）：读屏→混合→回屏
+static OvDst s_ovd;                                // 绘制代理（cv 非空 = 画布1）
+static int s_ov_x = 0, s_ov_y = 0, s_ov_w = 0, s_ov_h = 0, s_ov_t = 0;
+static uint32_t s_ov_sig = 0;                      // 内容指纹（变化才重画内容）
+static uint16_t s_ov_magic = 0;                    // 透明区魔数色
+static bool s_ov_draw = false, s_ov_merge = false; // 本轮动作
+
+bool ov_rows_touched(int y0, int y1)
+{
+  int r0 = y0 / kCellH, r1 = (y1 - 1) / kCellH;
+  if (r0 < 0) r0 = 0;
+  for (int r = r0; r <= r1 && r < 32; r++)
+    if (s_frame_painted & (1u << r)) return true;
+  return false;
+}
+
+uint16_t ov_magic_i(uint16_t base, const uint16_t* avoid, int n)
+{
+  uint16_t m = (uint16_t)(base + 1);   // 默认底色 +1（0xFFFF 溢出回 0x0000）
+  for (;;) {
+    bool clash = false;
+    for (int i = 0; i < n; i++) if (avoid[i] == m) { clash = true; break; }
+    if (!clash) return m;
+    m = (uint16_t)(m + 1);             // 与用色撞车则继续 +1
+  }
+}
+
+// 绘制代理 OvDst 方法定义见下方 term 作用域（声明在 ui.h）
+
+OvDst& ov_dst_i() { return s_ovd; }
+
+bool ov_begin_i(int x, int y, int w, int h, int transparency, uint32_t sig, uint16_t magic)
+{
+  s_ov_draw = s_ov_merge = false;
+  if (transparency <= 0) { s_ov_draw = true; return true; }  // 不透明：每帧直绘
+  if (T == nullptr || w <= 0 || h <= 0 || w > kOvMaxW || h > kOvMaxH) return false;
+  if (x < 0 || y < 0 || x + w > kCanvasW || y + h > kCanvasH) return false;   // 越界拒绝（L4：fb_read_rect 裸读防线）
+  const bool rect_chg = (x != s_ov_x || y != s_ov_y || w != s_ov_w || h != s_ov_h ||
+                         transparency != s_ov_t || magic != s_ov_magic);
+  const bool rebuild = rect_chg || s_ov_color == nullptr || sig != s_ov_sig;
+  const bool touch = ov_rows_touched(y, y + h);              // 屏幕更新与矩形行相交
+  if (!rebuild && !touch) return false;                      // 都没变：整段跳过
+  if (rebuild) {
+    if (s_ov_color == nullptr) {
+      s_ov_color = new (std::nothrow) lgfx::LGFX_Sprite(&tft);
+      if (s_ov_color == nullptr) return false;
+      s_ov_color->setColorDepth(16);
+    }
+    if (w != s_ov_sw || h != s_ov_sh) {                      // 只裁显示区域：尺寸变化才重建
+      s_ov_color->deleteSprite();
+      if (!s_ov_color->createSprite(w, 2 * h)) { s_ov_sw = s_ov_sh = 0; return false; }
+      s_ov_sw = w; s_ov_sh = h;
+    }
+    // 画布1（上半）：魔数填充 = 透明区标记（不读屏），UI 由调用方画在其上
+    s_ov_color->setRawColor(magic);
+    s_ov_color->fillRect(0, 0, w, h);
+    s_ov_x = x; s_ov_y = y; s_ov_w = w; s_ov_h = h; s_ov_t = transparency;
+    s_ov_sig = sig; s_ov_magic = magic;
+    s_ovd.cv = s_ov_color; s_ovd.ox = x; s_ovd.oy = y;
+    s_ov_draw = true; s_ov_merge = true;
+    return true;
+  }
+  // 内容未变、仅屏幕更新：不重画内容，只合成
+  s_ov_draw = false; s_ov_merge = true;
+  return false;
+}
+
+void ov_end_i()
+{
+  s_ovd.cv = nullptr;
+  if (!s_ov_merge || s_ov_color == nullptr) return;
+  s_ov_merge = false;
+  const int x = s_ov_x, y = s_ov_y, w = s_ov_w, h = s_ov_h;
+  // 干净底：本帧未重画的被盖行先按最新屏缓冲重合成（防逐帧混合累积）
+  {
+    uint32_t need = 0;
+    for (int r = y / kCellH; r <= (y + h - 1) / kCellH && r < 32; r++)
+      if (!(s_frame_painted & (1u << r))) need |= 1u << r;
+    if (need) { T->s_dirty |= need; present_core(); s_frame_painted |= need; }
+  }
+  // 画布2（下半）= 屏幕当前像素（只在合成前读一次）；画布1 非魔数像素
+  // 按透明度混合进画布2，魔数像素不拷（原样透出）；完成后画布2 直接回屏
+  uint16_t* buf = (uint16_t*)s_ov_color->getBuffer();
+  const uint16_t* src = buf;                       // 画布1（上半）
+  uint16_t* dst = buf + (size_t)w * h;             // 画布2（下半）
+  fb_read_rect(x, y, w, h, dst);
+  const size_t n = (size_t)w * h;
+  for (size_t i = 0; i < n; i++) {
+    const uint16_t v = src[i];
+    if (v == s_ov_magic) continue;                 // 魔数 = 透明区：原样透出
+    const uint16_t o = dst[i];
+    dst[i] = (v == o) ? o : mix565(o, v, s_ov_t);
+  }
+  tft.pushImage(x, y, w, h, dst);                  // 画布2 直接回屏
 }
 
 // ── toast 叠加层实现（状态/几何/排版/绘制/恢复）──────────────────────
 // 状态独立于窗口 State：activate/state_resize 换 State* 不影响它，
 // 下次 present_now 会按（新的）当前窗口调色板重画；到期由 tick() 恢复。
-// 几何（严格按规格）：屏幕最上方、水平居中、上边距 10px、总高 32px、
-// 边框 2px（不透明、无抗锯齿）、内部可视区 28px、圆角半径 6px；
-// 宽度 = 文本宽 + 左右内边距 24 + 边框 4，上限屏宽（超宽截断文本）。
+// 几何：屏幕最上方、水平居中、上边距 14px、总高 24px、
+// 边框 2px（不透明、无抗锯齿）、内部可视区 20px、外圆角 8px / 内圆角 6px
+//（r8 样式：2px 边框下内圆角 = 外圆角 - 边框）；
+// 宽度 = 文本宽 + 左右内边距 7px + 边框 4px，上限屏宽（超宽截断文本）。
 constexpr int kToastTop    = 14;    // 上边距（下移 4px）
 constexpr int kToastH      = 24;    // 总高（含边框）
-constexpr int kToastR      = 9;     // 外圆角半径
+constexpr int kToastR      = 8;     // 外圆角半径（r8 样式；内圆角 = kToastR - kToastBorder = 6）
 constexpr int kToastBorder = 2;     // 边框宽度（不透明像素）
 constexpr int kToastPadX   = 7;     // 左右内边距（各缩短 5px）
 constexpr int kToastTextH  = 14;    // 固定 8x14 字体行高
@@ -1220,14 +1380,14 @@ static void fill_round_rect(int x, int y, int w, int h, int r, uint16_t col)
   if (w <= 0 || h <= 0) return;
   if (r > w / 2) r = w / 2;
   if (r > h / 2) r = h / 2;
-  if (r <= 0) { tft.fillRect(x, y, w, h, col); return; }
-  tft.fillRect(x + r, y, w - 2 * r, h, col);              // 中段（贯穿全高）
-  tft.fillRect(x, y + r, r, h - 2 * r, col);              // 左直边
-  tft.fillRect(x + w - r, y + r, r, h - 2 * r, col);      // 右直边
-  tft.fillCircle(x + r, y + r, r, col);                   // 四角（无 AA）
-  tft.fillCircle(x + w - r - 1, y + r, r, col);
-  tft.fillCircle(x + r, y + h - r - 1, r, col);
-  tft.fillCircle(x + w - r - 1, y + h - r - 1, r, col);
+  if (r <= 0) { ov_dst().fillRect(x, y, w, h, col); return; }
+  ov_dst().fillRect(x + r, y, w - 2 * r, h, col);              // 中段（贯穿全高）
+  ov_dst().fillRect(x, y + r, r, h - 2 * r, col);              // 左直边
+  ov_dst().fillRect(x + w - r, y + r, r, h - 2 * r, col);      // 右直边
+  ov_dst().fillCircle(x + r, y + r, r, col);                   // 四角（无 AA）
+  ov_dst().fillCircle(x + w - r - 1, y + r, r, col);
+  ov_dst().fillCircle(x + r, y + h - r - 1, r, col);
+  ov_dst().fillCircle(x + w - r - 1, y + h - r - 1, r, col);
 }
 
 // 宽容 UTF-8 解码：返回码点并让 p 前进；非法/截断序列按 U+FFFD 处理（不越界读）。
@@ -1284,11 +1444,25 @@ static void toast_layout(const char* text)
 
 // 文本条带渲染：固定 8x14 字体表，先按背景色铺满条带再点字形像素，
 // 合成到局部缓冲后一次 pushImage 上屏（与行渲染同一条"内存合成"思路）。
-// 字形墨迹可宽于单元（斜体/宽字溢出）：按单元宽裁剪，避免压到相邻字形。
+// 字形墨迹可宽于单元（字表设计允许溢出压到右侧相邻格）：与终端行渲染一致
+// ——完整绘制、允许相邻重叠，不再按单元裁剪；条带宽度推到最右墨迹。
 static void toast_draw_text(int x, int y, uint16_t fg, uint16_t bg)
 {
-  const int tw = s_toast.textw;
+  int tw = s_toast.textw;
   if (tw <= 0) return;
+  {
+    int gx = 0;
+    for (int i = 0; i < s_toast.ncp; i++) {
+      const termfont::TermGlyph* g = (s_toast.cp[i] <= 0xFFFF)
+          ? termfont::find(termfont::font_8x14, (uint16_t)s_toast.cp[i]) : nullptr;
+      if (g != nullptr) {
+        const int e = gx + (int)g->w;
+        if (e > tw) tw = e;
+      }
+      gx += s_toast.cw[i];
+    }
+  }
+  if (tw > kCanvasW) tw = kCanvasW;
   static uint16_t band[kCanvasW * kToastTextH];   // ≤292×14，8.2KB
   for (int i = 0; i < tw * kToastTextH; i++) band[i] = bg;
   const int rows = termfont::font_8x14.rows;      // = 14
@@ -1300,7 +1474,8 @@ static void toast_draw_text(int x, int y, uint16_t fg, uint16_t bg)
         ? termfont::find(termfont::font_8x14, (uint16_t)cp) : nullptr;
     if (g != nullptr) {
       const uint16_t* bits = &termfont::font_8x14.bits[g->bits];
-      const int maxc = g->w < cellpx ? g->w : cellpx;   // 墨迹宽于单元时按单元裁剪
+      int maxc = (int)g->w;                        // 全墨绘制（不再按单元裁剪）
+      if (maxc > tw - gx) maxc = tw - gx;          // 右缘钳到条带
       for (int r = 0; r < rows && r < kToastTextH; r++) {
         const uint16_t row = bits[r];
         if (row == 0) continue;
@@ -1321,7 +1496,7 @@ static void toast_draw_text(int x, int y, uint16_t fg, uint16_t bg)
     }
     gx += cellpx;
   }
-  tft.pushImage(x, y, tw, kToastTextH, band);
+  ov_dst().pushImage(x, y, tw, kToastTextH, band);
 }
 
 // 把当前 toast 画到屏幕最上层（必须在行/光标重画之后调用）。
@@ -1331,17 +1506,31 @@ static void toast_paint()
 {
   if (!s_toast.visible || T == nullptr || s_quiet) return;
   if (now_ms_() >= s_toast.until) return;      // 已到期：不再重画，等 tick 统一恢复
-  const uint16_t bg = to565(toast_pal_color(T, 8));    // bright0 → 背景
-  const uint16_t bd = to565(toast_pal_color(T, 12));   // bright4 → 边框
-  const uint16_t fg = to565(toast_pal_color(T, 15));   // bright7 → 文字
+  // 配色：toast_* 细覆盖 > popup_* 三色方案 > bright 色系（ui_chrome_colors 同源）
+  uint32_t bg8 = 0, bd8 = 0, fg8 = 0;
+  ui_chrome_colors(&bg8, &bd8, &fg8);
+  const uint16_t bg = to565(bg8);       // bright0 → 背景
+  const uint16_t bd = to565(bd8);       // bright4 → 边框
+  const uint16_t fg = to565(fg8);       // bright7 → 文字
   const int x = s_toast.x, y = s_toast.y, w = s_toast.w;
+  // 内容指纹（位置/配色/文本）：不变则不重画内容，只随屏幕更新合成
+  uint32_t sig = 2166136261u;
+  auto fnv = [&sig](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+  fnv((uint32_t)x); fnv((uint32_t)y); fnv((uint32_t)w);
+  fnv(bg); fnv(bd); fnv(fg);
+  for (int i = 0; i < s_toast.ncp; i++) fnv(s_toast.cp[i]);
+  const uint16_t avoid[3] = { bg, bd, fg };
+  const uint16_t magic = ov_magic(bg, avoid, 3);
   // ① 外圈（边框色）→ ② 内缩 2px（背景色，留出 2px 边框）→ ③ 文本条带
-  fill_round_rect(x, y, w, kToastH, kToastR, bd);
-  const int iw = w - 2 * kToastBorder;
-  const int ih = kToastH - 2 * kToastBorder;                 // 20
-  fill_round_rect(x + kToastBorder, y + kToastBorder, iw, ih, kToastR - kToastBorder, bg);
-  const int ty = y + kToastBorder + (ih - kToastTextH) / 2 + 1;  // 文字在 20px 内部区垂直居中，再下移 1px
-  toast_draw_text(x + kToastBorder + kToastPadX, ty, fg, bg);
+  if (ov_begin(x, y, w, kToastH, s_ui.toast_prompt_transparency, sig, magic)) {
+    fill_round_rect(x, y, w, kToastH, kToastR, bd);
+    const int iw = w - 2 * kToastBorder;
+    const int ih = kToastH - 2 * kToastBorder;               // 20
+    fill_round_rect(x + kToastBorder, y + kToastBorder, iw, ih, kToastR - kToastBorder, bg);
+    const int ty = y + kToastBorder + (ih - kToastTextH) / 2 + 1;  // 文字在 20px 内部区垂直居中，再下移 1px
+    toast_draw_text(x + kToastBorder + kToastPadX, ty, fg, bg);
+  }
+  ov_end();
 }
 
 // 恢复 toast 覆盖的区域：把被覆盖到的屏幕行整行标脏后立即合帧重画
@@ -1360,7 +1549,8 @@ static void toast_clear_region()
 }
 
 // 显示一条 toast（内部实现）：已有旧 toast 时先按旧区域恢复，再排版/绘制新的。
-// 立即绘制（交互反馈不等下一帧）；之后每次 present_now 末尾都会重画以压在最上层。
+// 立即绘制（交互反馈不等下一帧）；之后每次 present_now 都会重画。
+// 图层规范：toast 位于拼音输入框之下、全屏提示框之下。
 static void toast_show(const char* text, int ms)
 {
   if (!s_toast.enabled || text == nullptr || T == nullptr) return;
@@ -1566,6 +1756,7 @@ static void term_decstr()
   T->s_g0 = 0; T->s_g1 = 0; T->s_so = false;
   T->s_wrap_pending = false;
   T->s_esc_delim = 0;
+  T->s_kkp_flags = 0; T->s_kkp_sp = 0;      // kitty 键盘协议状态一并复位（L6）
   mark_row(T->s_row);                 // 光标形状/颜色变了：该行整行重合成（内容本身不变）
 }
 
@@ -1816,7 +2007,6 @@ void csi_exec(const char* body, int len, char fin)
       T->s_col = prev_tab(kk);
       break;
     }
-      break;
     case 'I': {                                      // CHT：前进 n 个制表位
       follow_output(); T->s_wrap_pending = false;
       int kk = (n && p[0] > 0) ? p[0] : 1;
@@ -1824,7 +2014,6 @@ void csi_exec(const char* body, int len, char fin)
       T->s_col = next_tab(kk);
       break;
     }
-      break;
     case 'S': {                                      // SU：滚动区域上滚 n 行
       follow_output();
       int k = (n && p[0] > 0) ? p[0] : 1;
@@ -1948,6 +2137,45 @@ void csi_exec(const char* body, int len, char fin)
 
 }  // namespace
 
+// ── 半透明合成画布公开 API（流程/实现见上；terminal.h 有契约说明）────────
+// 绘制代理 OvDst 方法定义见下方 term 作用域（声明在 ui.h）
+// 绘制代理：cv 非空时把屏幕坐标平移为画布 (0,0) 原点坐标，颜色 setRawColor
+// 原样写 RGB565（不经转换链）；屏幕路径维持原 tft 调用（设备 565 原样存储）
+void OvDst::fillRect(int x, int y, int w, int h, uint16_t col)
+{
+  if (cv == nullptr) { tft.fillRect(x, y, w, h, col); return; }
+  cv->setRawColor(col);
+  cv->fillRect(x - ox, y - oy, w, h);
+}
+void OvDst::fillCircle(int x, int y, int r, uint16_t col)
+{
+  if (cv == nullptr) { tft.fillCircle(x, y, r, col); return; }
+  cv->setRawColor(col);
+  cv->fillCircle(x - ox, y - oy, r);
+}
+void OvDst::drawRoundRect(int x, int y, int w, int h, int r, uint16_t col)
+{
+  if (cv == nullptr) { tft.drawRoundRect(x, y, w, h, r, col); return; }
+  cv->setRawColor(col);
+  cv->drawRoundRect(x - ox, y - oy, w, h, r);
+}
+void OvDst::pushImage(int x, int y, int w, int h, const uint16_t* data)
+{
+  if (cv == nullptr) { tft.pushImage(x, y, w, h, data); return; }
+  cv->pushImage(x - ox, y - oy, w, h, data);
+}
+
+OvDst& ov_dst() { return ov_dst_i(); }
+uint16_t ov_magic(uint16_t base, const uint16_t* avoid, int n)
+{
+  return ov_magic_i(base, avoid, n);
+}
+bool ov_begin(int x, int y, int w, int h, int transparency, uint32_t sig, uint16_t magic)
+{
+  return ov_begin_i(x, y, w, h, transparency, sig, magic);
+}
+void ov_end() { ov_end_i(); }
+
 // 立即上屏（公开 API，见 terminal.h）：输出暂停/交互操作时调用
 void present() { present_now(); }
 
@@ -1974,37 +2202,520 @@ void set_toast_enabled(bool on)
 // 屏上当前是否有 toast（session 可用它避免重复提示/决定是否强行 present）。
 bool toast_active() { return s_toast.visible; }
 
-// ── 全屏倒计时退出提示（req 2/3 共用：剥离/关闭最后一个窗口）────────
-// 独立绘制（不依赖终端状态 T，窗口已关闭也可能调用）：整屏铺深底色 →
-// 14px 边距、2px 边框矩形（toast 同款配色：bright0 底 / bright4 边框 /
-// bright7 文字）→ 三行 8x14 文本水平垂直居中。第三行 "cardterm will exit
-// in Ns." 逐秒重绘 3→2→1，各显示满 1 秒后返回（调用方随即退出程序）。
+// ── 叠加层扩展（1.3.0-rc003 拼音候选框）────────────────────────
+void set_overlay_hook(void (*fn)()) { s_overlay_hook = fn; }
+
+const cfg::UiColors& ui_colors() { return s_ui; }
+
+void mark_pixel_rows(int py0, int py1)
+{
+  if (T == nullptr || py1 <= py0) return;
+  int y0 = py0 / kCellH;
+  int y1 = (py1 - 1) / kCellH;
+  if (y0 < 0) y0 = 0;
+  if (y1 >= kRows) y1 = kRows - 1;
+  for (int y = y0; y <= y1; y++) mark_row(y);
+}
+
+void cursor_cell(int* col, int* row)
+{
+  if (col) *col = (T != nullptr) ? T->s_col : 0;
+  if (row) *row = (T != nullptr) ? T->s_row : 0;
+}
+
+uint32_t pal_config(int idx)
+{
+  if (T == nullptr) return 0;
+  if (idx < 0) idx = 0;
+  if (idx > 15) idx = 15;
+  return T->s_pal[idx] & 0x00FFFFFFu;   // 配置 16 色（不含 OSC4 动态调色板）
+}
+
+// popup_* 单色解析：kUiPalFlag|idx → 当前调色板槽位（跟随动态调色板）；
+// RGB888 → 固定色；未配置（0）→ 默认槽位（无窗口时用默认调色板常量兜底）。
+static uint32_t chrome_one(uint32_t conf, int pal_idx, uint32_t fallback)
+{
+  if (conf == 0) conf = cfg::kUiPalFlag | (uint32_t)pal_idx;
+  if ((conf & cfg::kUiPalFlag) != 0)
+    return (T != nullptr) ? toast_pal_color(T, (int)(conf & 0xFFu)) : fallback;
+  return conf;
+}
+
+// toast/全屏横幅共用三色：toast_* 覆盖优先，否则 popup_* 三色方案（[colors]，
+// 默认 bright0/4/7），再否则当前窗口调色板 bright0/4/7（与 toast_paint 同源同序）。
+// 拼音框默认三色取这里，保证与 toast/横幅一致。
+void ui_chrome_colors(uint32_t* bg, uint32_t* border, uint32_t* fg)
+{
+  uint32_t b = chrome_one(s_ui.popup_bg, 8, 0x636163u);       // bright0 → 背景
+  uint32_t d = chrome_one(s_ui.popup_border, 12, 0x5AC7FFu);  // bright4 → 边框
+  uint32_t f = chrome_one(s_ui.popup_text, 15, 0xFFFFFFu);    // bright7 → 文字
+  if (bg != nullptr)     *bg     = s_ui.toast_bg     ? s_ui.toast_bg     : b;
+  if (border != nullptr) *border = s_ui.toast_border ? s_ui.toast_border : d;
+  if (fg != nullptr)     *fg     = s_ui.toast_text   ? s_ui.toast_text   : f;
+}
+
+// ── 文本原语（字体表单份实现；给 ime_ui 等叠加层用）───────────────
+// 单个码点的格数（8x14 表判全半角；表外码点按 wcwidth 近似，与 toast_layout 同源）
+static int glyph_cells814(uint32_t cp)
+{
+  const termfont::TermGlyph* g = (cp <= 0xFFFF)
+      ? termfont::find(termfont::font_8x14, (uint16_t)cp) : nullptr;
+  int cells;
+  if (g != nullptr) cells = g->cells;
+  else {
+    const int w = cp_width(cp);
+    cells = (w <= 0) ? 0 : (w >= 2 ? 2 : 1);
+  }
+  if (cells < 0) cells = 0;
+  if (cells > 2) cells = 2;
+  return cells;
+}
+
+int text_cells814(const char* utf8, int cap_cells)
+{
+  if (utf8 == nullptr) return 0;
+  int cells = 0;
+  const char* p = utf8;
+  while (*p != '\0') {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const int c = glyph_cells814(cp);
+    if (c == 0) continue;
+    if (cap_cells > 0 && cells + c > cap_cells) break;   // 只在整字形边界截断
+    cells += c;
+  }
+  return cells;
+}
+
+void draw_text814(int x, int y, const char* utf8, uint32_t fg, uint32_t bg,
+                  bool opaque, int cap_cells)
+{
+  if (utf8 == nullptr) return;
+  const uint16_t f565 = to565(fg), b565 = to565(bg);
+  static uint16_t band[kCanvasW * kToastTextH];
+  const int rows = termfont::font_8x14.rows;      // = 14
+  if (!opaque) {
+    // 只画墨迹：逐行找连续墨迹段填充（透明背景，透出终端内容）
+    const char* p = utf8;
+    int gx = 0;
+    while (*p != '\0') {
+      const uint32_t cp = toast_utf8_next(p);
+      if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+      const int cells = glyph_cells814(cp);
+      if (cells == 0) continue;
+      const int cellpx = cells * kToastGlyphW;
+      if (cap_cells > 0 && gx + cells * kToastGlyphW > cap_cells * kToastGlyphW) break;
+      const termfont::TermGlyph* g = (cp <= 0xFFFF)
+          ? termfont::find(termfont::font_8x14, (uint16_t)cp) : nullptr;
+      if (g != nullptr) {
+        const uint16_t* bits = &termfont::font_8x14.bits[g->bits];
+        const int maxc = (int)g->w;          // 全墨绘制：墨迹可溢出压到右侧相邻格（同终端行渲染）
+        for (int r = 0; r < rows; r++) {
+          const uint16_t row = bits[r];
+          if (row == 0) continue;
+          int run = -1;
+          for (int c = 0; c <= maxc; c++) {
+            const bool ink = (c < maxc) && (row & (1u << c));
+            if (ink && run < 0) run = c;
+            else if (!ink && run >= 0) {
+              ov_dst().fillRect(x + gx + run, y + r, c - run, 1, f565);
+              run = -1;
+            }
+          }
+        }
+      }
+      gx += cellpx;
+    }
+    return;
+  }
+  // 铺底 + 字形：合成到条带后一次 pushImage（与 toast_draw_text 同思路）。
+  // 字形墨迹可宽于单元（字表设计允许溢出压到右侧相邻格）：与终端行渲染一致
+  // ——完整绘制、允许与相邻字/光标重叠，不再按单元裁剪；条带宽度推到最右墨迹。
+  int tw = text_cells814(utf8, cap_cells) * kToastGlyphW;
+  if (tw <= 0) return;
+  if (tw > kCanvasW) tw = kCanvasW;
+  int stride = tw;
+  {
+    const char* q = utf8;
+    int gx = 0;
+    while (*q != '\0' && gx < tw) {
+      const uint32_t cp = toast_utf8_next(q);
+      if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+      const int cells = glyph_cells814(cp);
+      if (cells == 0) continue;
+      const int cellpx = cells * kToastGlyphW;
+      if (gx + cellpx > tw) break;
+      const termfont::TermGlyph* g = (cp <= 0xFFFF)
+          ? termfont::find(termfont::font_8x14, (uint16_t)cp) : nullptr;
+      if (g != nullptr) {
+        const int e = gx + (int)(g->w < kCanvasW ? g->w : kCanvasW);
+        if (e > stride) stride = e;
+      }
+      gx += cellpx;
+    }
+  }
+  if (stride > kCanvasW) stride = kCanvasW;
+  for (int i = 0; i < stride * kToastTextH; i++) band[i] = b565;
+  const char* p = utf8;
+  int gx = 0;
+  while (*p != '\0' && gx < tw) {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const int cells = glyph_cells814(cp);
+    if (cells == 0) continue;
+    const int cellpx = cells * kToastGlyphW;
+    if (gx + cellpx > tw) break;
+    const termfont::TermGlyph* g = (cp <= 0xFFFF)
+        ? termfont::find(termfont::font_8x14, (uint16_t)cp) : nullptr;
+    if (g != nullptr) {
+      const uint16_t* bits = &termfont::font_8x14.bits[g->bits];
+      int maxc = (int)g->w;                              // 全墨绘制（不再按单元裁剪）
+      if (maxc > stride - gx) maxc = stride - gx;        // 右缘钳到条带
+      for (int r = 0; r < rows && r < kToastTextH; r++) {
+        const uint16_t row = bits[r];
+        if (row == 0) continue;
+        uint16_t* out = band + r * stride + gx;
+        for (int c = 0; c < maxc; c++)
+          if (row & (1u << c)) out[c] = f565;
+      }
+    } else {
+      for (int c = 0; c < cellpx; c++) {
+        band[gx + c] = f565;
+        band[(kToastTextH - 1) * stride + gx + c] = f565;
+      }
+      for (int r = 0; r < kToastTextH; r++) {
+        band[r * stride + gx] = f565;
+        band[r * stride + gx + cellpx - 1] = f565;
+      }
+    }
+    gx += cellpx;
+  }
+  ov_dst().pushImage(x, y, stride, kToastTextH, band);
+}
+
+// ── 6x10 小字文本（拼音状态行 N/M Tab 用；字表口径与 8x14 同）────────
+static int glyph_cells610(uint32_t cp)
+{
+  const termfont::TermGlyph* g = (cp <= 0xFFFF)
+      ? termfont::find(termfont::font_6x10, (uint16_t)cp) : nullptr;
+  if (g != nullptr) return g->cells;
+  const int w = cp_width(cp);
+  if (w <= 0) return 0;
+  return w >= 2 ? 2 : 1;
+}
+
+int text_px610(const char* utf8)
+{
+  if (utf8 == nullptr) return 0;
+  const int cell = termfont::font_6x10.cell_w;          // = 6
+  int px = 0;
+  const char* p = utf8;
+  while (*p != '\0') {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const int cells = glyph_cells610(cp);
+    if (cells == 0) continue;
+    px += cells * cell;
+  }
+  return px;
+}
+
+void draw_text610(int x, int y, const char* utf8, uint32_t fg, uint32_t bg, bool opaque)
+{
+  if (utf8 == nullptr) return;
+  const uint16_t f565 = to565(fg), b565 = to565(bg);
+  const termfont::FontTable& F = termfont::font_6x10;
+  const int rows = F.rows;                              // = 10
+  const int cell = F.cell_w;                            // = 6
+  const char* p = utf8;
+  int gx = 0;
+  while (*p != '\0') {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const int cells = glyph_cells610(cp);
+    if (cells == 0) continue;
+    const int cellpx = cells * cell;
+    if (opaque) ov_dst().fillRect(x + gx, y, cellpx, rows, b565);
+    const termfont::TermGlyph* g = (cp <= 0xFFFF)
+        ? termfont::find(F, (uint16_t)cp) : nullptr;
+    if (g != nullptr) {
+      const uint16_t* bits = &F.bits[g->bits];
+      const int maxc = (int)g->w;   // 全墨绘制（墨迹可溢出压到右侧相邻格，同终端行渲染）
+      for (int r = 0; r < rows; r++) {
+        const uint16_t row = bits[r];
+        if (row == 0) continue;
+        int run = -1;
+        for (int c = 0; c <= maxc; c++) {
+          const bool ink = (c < maxc) && (row & (1u << c));
+          if (ink && run < 0) run = c;
+          else if (!ink && run >= 0) {
+            ov_dst().fillRect(x + gx + run, y + r, c - run, 1, f565);
+            run = -1;
+          }
+        }
+      }
+    }
+    gx += cellpx;
+  }
+}
+
+// ── 4x7 最小字体文本（拼音翻页标签 TAB 小片用；口径与 6x10 同）──────
+static int glyph_cells4x7(uint32_t cp)
+{
+  const termfont::TermGlyph* g = (cp <= 0xFFFF)
+      ? termfont::find(termfont::font_4x7, (uint16_t)cp) : nullptr;
+  if (g != nullptr) return g->cells;
+  const int w = cp_width(cp);
+  if (w <= 0) return 0;
+  return w >= 2 ? 2 : 1;
+}
+
+int text_px4x7(const char* utf8)
+{
+  if (utf8 == nullptr) return 0;
+  const int cell = termfont::font_4x7.cell_w;           // = 4
+  int px = 0;
+  const char* p = utf8;
+  while (*p != '\0') {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const int cells = glyph_cells4x7(cp);
+    if (cells == 0) continue;
+    px += cells * cell;
+  }
+  return px;
+}
+
+void draw_text4x7(int x, int y, const char* utf8, uint32_t fg, uint32_t bg, bool opaque)
+{
+  if (utf8 == nullptr) return;
+  const uint16_t f565 = to565(fg), b565 = to565(bg);
+  const termfont::FontTable& F = termfont::font_4x7;
+  const int rows = F.rows;                              // = 7
+  const int cell = F.cell_w;                            // = 4
+  const char* p = utf8;
+  int gx = 0;
+  while (*p != '\0') {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const int cells = glyph_cells4x7(cp);
+    if (cells == 0) continue;
+    const int cellpx = cells * cell;
+    if (opaque) ov_dst().fillRect(x + gx, y, cellpx, rows, b565);
+    const termfont::TermGlyph* g = (cp <= 0xFFFF)
+        ? termfont::find(F, (uint16_t)cp) : nullptr;
+    if (g != nullptr) {
+      const uint16_t* bits = &F.bits[g->bits];
+      const int maxc = (int)g->w;   // 全墨绘制（同终端行渲染，允许相邻重叠）
+      for (int r = 0; r < rows; r++) {
+        const uint16_t row = bits[r];
+        if (row == 0) continue;
+        int run = -1;
+        for (int c = 0; c <= maxc; c++) {
+          const bool ink = (c < maxc) && (row & (1u << c));
+          if (ink && run < 0) run = c;
+          else if (!ink && run >= 0) {
+            ov_dst().fillRect(x + gx + run, y + r, c - run, 1, f565);
+            run = -1;
+          }
+        }
+      }
+    }
+    gx += cellpx;
+  }
+}
+
+// ── toast 外观提示框（指定左上角绘制；拼音框"无候选词"等用）─────────
+// 排版/渲染与 toast_paint 同口径（8x14 字表、8px 单宽/16px 双宽、垂直居中
+// +1px、条带一次 pushImage），但位置由调用方决定、三色由调用方给（与
+// toast 同源三色），不占用/不清除 toast 单例。
+static int toast_style_layout(const char* text, uint32_t* cp, uint8_t* cw,
+                              int maxcp, int* textw)
+{
+  int n = 0, tw = 0;
+  *textw = 0;
+  if (text == nullptr) return 0;
+  const int maxw = kCanvasW - 2 * kToastBorder - 2 * kToastPadX;
+  const char* p = text;
+  while (*p != '\0' && n < maxcp) {
+    const uint32_t c = toast_utf8_next(p);
+    if (c < 0x20 || (c >= 0x7f && c < 0xa0)) continue;
+    const termfont::TermGlyph* g = (c <= 0xFFFF)
+        ? termfont::find(termfont::font_8x14, (uint16_t)c) : nullptr;
+    int cells;
+    if (g != nullptr) cells = g->cells;
+    else {
+      const int w = cp_width(c);
+      if (w <= 0) continue;
+      cells = w >= 2 ? 2 : 1;
+    }
+    if (cells < 1) cells = 1;
+    if (cells > 2) cells = 2;
+    const int px = cells * kToastGlyphW;
+    if (tw + px > maxw) break;
+    cp[n] = c; cw[n] = (uint8_t)px; tw += px; n++;
+  }
+  *textw = tw;
+  return n;
+}
+
+void toast_box_size(const char* utf8, int* w, int* h)
+{
+  uint32_t cp[64]; uint8_t cw[64]; int tw = 0;
+  toast_style_layout(utf8, cp, cw, 64, &tw);
+  if (w != nullptr) *w = tw + 2 * (kToastBorder + kToastPadX);
+  if (h != nullptr) *h = kToastH;
+}
+
+void toast_box_at(int x, int y, const char* utf8, uint32_t bg, uint32_t border, uint32_t fg)
+{
+  uint32_t cp[64]; uint8_t cw[64]; int tw = 0;
+  const int ncp = toast_style_layout(utf8, cp, cw, 64, &tw);
+  const int w = tw + 2 * (kToastBorder + kToastPadX);
+  const uint16_t b565 = to565(bg), bd565 = to565(border), f565 = to565(fg);
+  fill_round_rect(x, y, w, kToastH, kToastR, bd565);
+  fill_round_rect(x + kToastBorder, y + kToastBorder, w - 2 * kToastBorder,
+                  kToastH - 2 * kToastBorder, kToastR - kToastBorder, b565);
+  if (ncp <= 0 || tw <= 0) return;
+  {
+    int gx = 0;
+    for (int i = 0; i < ncp; i++) {          // 条带宽度推到最右墨迹（全墨绘制口径）
+      const termfont::TermGlyph* g = (cp[i] <= 0xFFFF)
+          ? termfont::find(termfont::font_8x14, (uint16_t)cp[i]) : nullptr;
+      if (g != nullptr) {
+        const int e = gx + (int)g->w;
+        if (e > tw) tw = e;
+      }
+      gx += cw[i];
+    }
+    if (tw > kCanvasW) tw = kCanvasW;
+  }
+  static uint16_t band[kCanvasW * kToastTextH];
+  for (int i = 0; i < tw * kToastTextH; i++) band[i] = b565;
+  const int rows = termfont::font_8x14.rows;            // = 14
+  int gx = 0;
+  for (int i = 0; i < ncp; i++) {
+    const int cellpx = cw[i];
+    const termfont::TermGlyph* g = (cp[i] <= 0xFFFF)
+        ? termfont::find(termfont::font_8x14, (uint16_t)cp[i]) : nullptr;
+    if (g != nullptr) {
+      const uint16_t* bits = &termfont::font_8x14.bits[g->bits];
+      int maxc = (int)g->w;                // 全墨绘制（不再按单元裁剪）
+      if (maxc > tw - gx) maxc = tw - gx;  // 右缘钳到条带
+      for (int r = 0; r < rows && r < kToastTextH; r++) {
+        const uint16_t row = bits[r];
+        if (row == 0) continue;
+        uint16_t* out = band + r * tw + gx;
+        for (int c = 0; c < maxc; c++)
+          if (row & (1u << c)) out[c] = f565;
+      }
+    } else {
+      for (int c = 0; c < cellpx; c++) {
+        band[gx + c] = f565;
+        band[(kToastTextH - 1) * tw + gx + c] = f565;
+      }
+      for (int r = 0; r < kToastTextH; r++) {
+        band[r * tw + gx] = f565;
+        band[r * tw + gx + cellpx - 1] = f565;
+      }
+    }
+    gx += cellpx;
+  }
+  ov_dst().pushImage(x + kToastBorder + kToastPadX,
+                y + kToastBorder + (kToastH - 2 * kToastBorder - kToastTextH) / 2 + 1,
+                tw, kToastTextH, band);
+}
+
+void draw_text_ink_win(int x, int y, const char* utf8, uint32_t fg, int cap_cells)
+{
+  if (utf8 == nullptr || s_font == nullptr) return;
+  const termfont::FontTable& F = *s_font;
+  const uint16_t f565 = to565(fg);
+  const char* p = utf8;
+  int gx = 0;
+  while (*p != '\0') {
+    const uint32_t cp = toast_utf8_next(p);
+    if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    const termfont::TermGlyph* g = (cp <= 0xFFFF)
+        ? termfont::find(F, (uint16_t)cp) : nullptr;
+    int cells = (g != nullptr) ? g->cells : (cp_width(cp) >= 2 ? 2 : 1);
+    if (cells < 1) cells = 1;
+    if (cells > 2) cells = 2;
+    if (cap_cells > 0 && gx / F.cell_w + cells > cap_cells) break;
+    const int cellpx = cells * F.cell_w;
+    if (x + gx >= kCanvasW) break;             // 右缘溢出：不显示、不换行
+    if (g != nullptr) {
+      const uint16_t* bits = &F.bits[g->bits];
+      const int maxc = (int)g->w;   // 全墨绘制（同终端行渲染，允许相邻重叠）
+      for (int r = 0; r < F.rows; r++) {
+        const uint16_t row = bits[r];
+        if (row == 0) continue;
+        int run = -1;
+        for (int c = 0; c <= maxc; c++) {
+          const bool ink = (c < maxc) && (row & (1u << c));
+          if (ink && run < 0) run = c;
+          else if (!ink && run >= 0) {
+            const int rx = x + gx + run;
+            const int rw = c - run;
+            if (rx < kCanvasW) ov_dst().fillRect(rx, y + r, rw, 1, f565);
+            run = -1;
+          }
+        }
+      }
+    }
+    gx += cellpx;
+  }
+}
+
+// ── 全屏倒计时退出提示（req 2/3 共用：剥离/关闭最后一个窗口、末窗程序自然退出）
+// toast 同款渲染的圆角提示框（42px 上下 / 32px 左右边距），直接叠在终端内容上：
+// 边缘透出之前的输出；显示前清除屏上 toast（同屏不再出现 toast）；
+// 三行 8x14 文本居中，第三行 "cardterm will exit in Ns." 逐秒重绘 3→2→1 后返回。
 void exit_prompt(const char* line1)
 {
-  const uint16_t bd = to565(0x5AC7FF);              // bright4：边框
-  const uint16_t bg = to565(0x636163);              // bright0：框内背景
-  const uint16_t fg = to565(0xFFFFFF);              // bright7：文字
-  const int M = 14, B = 2;
-  const int x = M, y = M, w = kCanvasW - 2 * M, h = kCanvasH - 2 * M;
-  tft.fillRect(0, 0, kCanvasW, kCanvasH, to565(0x242424));   // 盒外深底
-  fill_round_rect(x, y, w, h, kToastR, bd);          // 圆角边框矩形（同 toast 圆角）
-  fill_round_rect(x + B, y + B, w - 2 * B, h - 2 * B, kToastR - B, bg);
-
+  toast_clear_region();                        // 同屏不出现 toast：先清现存 toast
+  // 图层规范：全屏提示框为最上层（高于拼音输入框与 toast）；本框在两者之后
+  // 直接绘制，倒计时期间阻塞主循环，不再有合帧补画覆盖其上。
+  // 配色：config [colors] prompt_* 覆盖优先；未配置 = toast 同源三色（保持一致）
+  uint32_t cbg = 0, cbd = 0, cfg = 0;
+  ui_chrome_colors(&cbg, &cbd, &cfg);
+  const uint16_t bd = to565(s_ui.prompt_border ? s_ui.prompt_border : cbd);
+  const uint16_t bg = to565(s_ui.prompt_bg ? s_ui.prompt_bg : cbg);
+  const uint16_t fg = to565(s_ui.prompt_text ? s_ui.prompt_text : cfg);
+  const int MV = 42, MH = 32, B = 2;
+  const int x = MH, y = MV, w = kCanvasW - 2 * MH, h = kCanvasH - 2 * MV;   // 256×86
   const char* l2 = "No terminal running.";
   char l3[64];
   const int gap = 10;                                // 行间距
   const int total = 3 * kToastTextH + 2 * gap;       // 三行总高
   const int ih = h - 2 * B;
   for (int n = 3; n >= 1; n--) {
+    // 透明合成每档从干净底重渲染：清"本帧已重画行"记账，让 ov_end 先按屏缓冲
+    // 重画被盖行再混合。倒计时三档在同一帧记账域内逐档执行，记账跨档残留会让
+    // 2s/1s 档跳过干净底、叠在上一档混合结果上（越叠越不透明；rc303）。
+    s_frame_painted = 0;
     snprintf(l3, sizeof l3, "cardterm will exit in %ds.", n);
-    const char* texts[3] = { line1, l2, l3 };
-    int ty = y + B + (ih - total) / 2;
-    for (int i = 0; i < 3; i++) {
-      toast_layout(texts[i]);                        // 复用 toast 的 8x14 排版
-      const int tx = x + B + (w - 2 * B - s_toast.textw) / 2;   // 水平居中
-      if (s_toast.textw > 0 && tx >= x + B) toast_draw_text(tx, ty, fg, bg);
-      ty += kToastTextH + gap;
+    // 内容指纹（档位/配色/文本）：每档文字不同 → 必然重画一次内容
+    uint32_t sig = 2166136261u;
+    auto fnv = [&sig](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+    fnv((uint32_t)n); fnv(bg); fnv(bd); fnv(fg);
+    for (const char* q = line1; *q; q++) fnv((uint32_t)(unsigned char)*q);
+    const uint16_t avoid[3] = { bg, bd, fg };
+    const uint16_t magic = ov_magic(bg, avoid, 3);
+    if (ov_begin(x, y, w, h, s_ui.toast_prompt_transparency, sig, magic)) {
+      fill_round_rect(x, y, w, h, kToastR, bd);     // 圆角边框（toast 同款渲染）
+      fill_round_rect(x + B, y + B, w - 2 * B, h - 2 * B, kToastR - B, bg);
+      // 不铺盒外底色：终端内容从边缘透出
+      const char* texts[3] = { line1, l2, l3 };
+      int ty = y + B + (ih - total) / 2;
+      for (int i = 0; i < 3; i++) {
+        toast_layout(texts[i]);                      // 复用 toast 的 8x14 排版
+        const int tx = x + B + (w - 2 * B - s_toast.textw) / 2;   // 水平居中
+        if (s_toast.textw > 0 && tx >= x + B) toast_draw_text(tx, ty, fg, bg);
+        ty += kToastTextH + gap;
+      }
     }
+    ov_end();
     usleep(1000000);                                 // 每档显示满 1 秒
   }
 }
@@ -2028,9 +2739,24 @@ void reset_cursor_style()
 // 每窗口状态生命周期（0.3.0 多窗口）：
 //   state_new 创建并复位一份窗口状态（背景画布全局共享，仅首次加载）；
 //   activate 设为当前解析/绘制目标；state_free 释放。
+// 三宽度 Grid 分配（nothrow，OOM 返回空 shared_ptr → 调用方走降级/回滚；M5）
+static std::shared_ptr<void> make_grid(int kind)
+{
+  switch (kind) {
+    case 0: { G<40>* g = new (std::nothrow) G<40>();
+              return g ? std::shared_ptr<void>(g, [](void* q){ delete (G<40>*)q; }) : nullptr; }
+    case 2: { G<80>* g = new (std::nothrow) G<80>();
+              return g ? std::shared_ptr<void>(g, [](void* q){ delete (G<80>*)q; }) : nullptr; }
+    default: { G<53>* g = new (std::nothrow) G<53>();
+               return g ? std::shared_ptr<void>(g, [](void* q){ delete (G<53>*)q; }) : nullptr; }
+  }
+}
+
 State* state_new(const Options& opt)
 {
-  State* s = new State();
+  s_ui = opt.ui;                             // UI 配色覆盖（进程级；0 = 默认 bright）
+  State* s = new (std::nothrow) State();
+  if (s == nullptr) return nullptr;          // OOM：调用方降级分支已就绪（M5）
   State* prev = T;
   const int g_cols = kCols, g_rows = kRows, g_cw = kCellW, g_ch = kCellH;
   const termfont::FontTable* g_font = s_font;
@@ -2064,7 +2790,7 @@ State* state_new(const Options& opt)
     if (!s_canvas_master) { T = prev; kCols = g_cols; kRows = g_rows; kCellW = g_cw; kCellH = g_ch; s_font = g_font; delete s; return nullptr; }
     bool image_ok = false;
     if (opt.bg_image != nullptr && *opt.bg_image != '\0')
-      image_ok = load_image_to_canvas(opt.bg_image);
+      image_ok = load_image_to_canvas(opt.bg_image, opt.bg_image_transparency);
     if (!image_ok) {
       const uint16_t bg565 = to565(s->s_bg);
       for (int i = 0; i < kCanvasW * kCanvasH; i++) s_canvas_master[i] = bg565;
@@ -2075,11 +2801,8 @@ State* state_new(const Options& opt)
   memcpy(s->s_canvas.get(), s_canvas_master.get(), (size_t)kCanvasW * kCanvasH * 2);
 
   // 三宽度 Grid 分配（Row 构造自带空格+默认颜色）；shared_ptr 自定义删除器按类型释放
-  switch (s->s_kind) {
-    case 0:  s->s_grid = std::shared_ptr<void>(new G<40>(), [](void* q){ delete (G<40>*)q; }); break;
-    case 2:  s->s_grid = std::shared_ptr<void>(new G<80>(), [](void* q){ delete (G<80>*)q; }); break;
-    default: s->s_grid = std::shared_ptr<void>(new G<53>(), [](void* q){ delete (G<53>*)q; }); break;
-  }
+  s->s_grid = make_grid(s->s_kind);
+  if (!s->s_grid) { T = prev; kCols = g_cols; kRows = g_rows; kCellW = g_cw; kCellH = g_ch; s_font = g_font; delete s; return nullptr; }   // OOM 回滚（M5）
   hist_clear(s);
   tabs_reset();
   s->s_dirty = dirty_all_mask();              // 首次上屏整屏重画
@@ -2194,14 +2917,18 @@ State* state_resize(State* s, int font_size)
 
   // ② 新窗口（新宽度）+ 复制属性
   const int old_view = s->s_view;
-  State* ns = new State();
+  State* ns = new (std::nothrow) State();
+  if (ns == nullptr) return s;               // OOM：放弃本次缩放（M5）
   State* prevT = T;
   T = ns;
   apply_grid(ns, font_size);
-  switch (ns->s_kind) {
-    case 0:  ns->s_grid = std::shared_ptr<void>(new G<40>(), [](void* q){ delete (G<40>*)q; }); break;
-    case 2:  ns->s_grid = std::shared_ptr<void>(new G<80>(), [](void* q){ delete (G<80>*)q; }); break;
-    default: ns->s_grid = std::shared_ptr<void>(new G<53>(), [](void* q){ delete (G<53>*)q; }); break;
+  ns->s_grid = make_grid(ns->s_kind);
+  if (!ns->s_grid) {                          // OOM：回滚全局网格并放弃缩放（同 s_canvas 失败路径 A3）
+    T = prevT;
+    { State* keep = T ? T : s;
+      kCols = keep->s_cols; kRows = keep->s_rows;
+      kCellW = keep->s_cell_w; kCellH = keep->s_cell_h; s_font = keep->s_font; }
+    delete ns; return s;
   }
   memcpy(ns->s_pal, s->s_pal, sizeof ns->s_pal);
   // 新建终端语义：所有资源与内存重新分配（内容拷贝，旧窗随后整体释放）
@@ -2212,7 +2939,6 @@ State* state_resize(State* s, int font_size)
   if (s->s_canvas) {
     ns->s_canvas.reset(new (std::nothrow) uint16_t[(size_t)kCanvasW * kCanvasH]);
     if (!ns->s_canvas) {                       // OOM：放弃本次缩放，回滚旧状态（此前会 memcpy(nullptr) 崩溃）
-      fprintf(stderr, "[term] resize OOM (canvas), keeping current font\n");
       T = prevT;
       { // A3：回滚 apply_grid 已改写的全局网格（与 state_new 失败路径一致），
         // 否则调用方 resize_pty 会按错误尺寸发 TIOCSWINSZ
@@ -2596,8 +3322,14 @@ static bool               s_clip_loaded = false;
 static std::string clip_file()
 {
   if (!s_clip_path.empty()) return s_clip_path;
+  std::string base;
   const char* h = getenv("HOME");
-  std::string base = h ? h : "/home/me";
+  if (h && *h) base = h;
+  else {
+    // HOME 缺失：回退 passwd 家目录（不写死任何用户名）
+    struct passwd* pw = getpwuid(getuid());
+    base = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : "/tmp";
+  }
   s_clip_path = base + "/.config/cardterm/clipboard";
   return s_clip_path;
 }
@@ -3064,6 +3796,7 @@ static void term_ris()
   T->s_rev = false; T->s_bold = false;
   T->s_g0 = 0; T->s_g1 = 0; T->s_so = false; T->s_wrap_pending = false;
   T->s_esc_delim = 0;
+  T->s_kkp_flags = 0; T->s_kkp_sp = 0;      // kitty 键盘协议状态一并复位（L6）
   T->s_saved_row = 0; T->s_saved_col = 0;   // 备用屏存档位置
   tabs_reset();
   mark_all();                          // 整屏重画：旧光标被覆盖，present 按新颜色重画

@@ -13,14 +13,16 @@
 
 ## 特性
 
-- **极高性能和极低内存占用**：稳态约 6MB，12 窗口多开会话可控，直驱 /dev/fb0，
+- **极高性能和极低内存占用**：稳态约 6MB，12 窗口多开会话可控（真机实测基线
+  5.4–6.4MB；启用中文输入时 rime 引擎常驻约 +16MB），直驱 /dev/fb0，
   秒启动，字符渲染更快速。
 - **自定义终端主题颜色和 PNG/JPG 背景图**：16 色 ANSI 调色板逐色可配、光标色、
   真彩（`SGR 38;2`）；背景图拉伸铺满、透明背景语义。
 - **TUI 兼容性**：codex / opencode / crush / vim / htop / nano 等 TUI 实测渲染与交互
   正常；备用屏、滚动域、重绘节拍良好。
 - **复杂协议支持**：kitty 键盘协议 (KKP)、`DA1/DA2/DECXCPR/DSR/DECRQM`、
-  `DECSCUSR`、`DECSTR/RIS`、`OSC 4/10/11/12/52/110-112`。
+  `DECSCUSR`、`DECSTR/RIS`、`OSC 4/10/11/12/52/110-112`（110/111/112 依次复位
+  默认前景/背景/光标色，与 xterm ctlseqs 一致）。
 - **USB/蓝牙外接键盘接管**：板载 + 最多 4 个外接并行、标准 US 键位、热插拔。
 - **多窗口**（`Ctrl+Alt+F1~F12`）、回滚/翻页、三档终端大小（80×24 / 53×17 / 40×12）、
   toast 事件通知。
@@ -47,7 +49,7 @@
 ```bash
 cmake --preset aarch64-cross && cmake --build build -j"$(nproc)"
 bash packaging/build-deb.sh          # → dist/cardterm_<ver>-1_arm64.deb
-sudo dpkg -i dist/cardterm_1.0.0-1_arm64.deb
+sudo dpkg -i dist/cardterm_1.3.0-1_arm64.deb
 ```
 
 安装后 APPLaunch 里出现 **cardterm** 启动项（`/usr/share/APPLaunch/bin/cardterm`），
@@ -70,7 +72,7 @@ cardterm ssh user@host   # 运行 ssh
 | `Fn+Q` | 关闭当前终端（类似关闭标签页） |
 | `Fn+U` / `Fn+I` | 当前窗口字号变小 / 变大（4×7 / 6×10 / 8×14） |
 | `Fn+A` / `Super+A` | 剥离当前会话到后台持续运行（重开 cardterm 自动接回） |
-| `Fn+H` / `Super+H` | 切到下一个空闲窗口并显示帮助页 |
+| `Fn+H` / `Super+H` | 在空闲窗口显示帮助页（当前窗口已空则就地显示） |
 | `Shift+PgUp/PgDn` | 回滚翻页 |
 | `Ctrl+Shift+↑/↓` | 回滚一行 |
 | 长按 `Esc` 2 秒 | 结束所有窗口并退出（SIGHUP → 宽限 → SIGKILL；已剥离会话不受影响） |
@@ -104,8 +106,8 @@ lines=2000                   # 少于 100 按 100 计；上限 30000
 hold_ms=2000                 # 手动翻页后保持不跳底时长（ms，上限 60000）
 
 [background]
-buffer_kb=256                # 后台会话恢复时贴回的输出文本上限（16–1048576 KB，
-                             #   默认 256；纯文本贴回，节省内存）
+buffer_kb=256                # 后台会话恢复时贴回的输出文本上限（16–4096 KB，
+                             #   默认 256，最多存 4MB 历史；纯文本贴回，节省内存）
 
 [text]
 splash=                      # 开屏文本（空 = 不显示；语法见下）
@@ -184,8 +186,8 @@ cardterm/
   分发时必须附 GPL-2 文本，并提供该字体的对应源码（BDF/生成脚本）；该字体数据不能按
   MIT 单独再许可（cardterm 代码本身仍是 MIT，属聚合关系）。
 - 二进制分发还需随附 LovyanGFX 的 FreeBSD 许可（其中已含 Adafruit glcdfont 的 BSD 段）。
-- deb 已随包补齐上述材料（`/usr/share/doc/cardterm/`：`COPYING-GPL-2.0.txt`、
-  `WenQuanYi/source/`、LovyanGFX/Adafruit 通知、`LICENSE`）。
+- deb 已随包补齐上述材料（`/usr/share/doc/cardterm/`：`fonts/WenQuanYi/COPYING-GPL-2.0.txt`、
+  `fonts/WenQuanYi/source/`、LovyanGFX/Adafruit 通知、`LICENSE`）。
 
 ## 致谢
 

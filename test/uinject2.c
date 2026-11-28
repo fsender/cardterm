@@ -53,7 +53,9 @@ int main(int argc, char** argv)
   logmsg("uinput opened");
 
   if (ioctl(ufd, UI_SET_EVBIT, EV_KEY) < 0) { logmsg("SET_EVBIT fail"); return 1; }
-  for (int c = 1; c < 256; c++) ioctl(ufd, UI_SET_KEYBIT, c);
+  // 启用全键码范围（含 Fn=KEY_DVD 389 / Sym=KEY_CD 383 / KEY_FN 464 等 >255 的
+  // 功能键码；旧版只开 1..255，注入 Fn 层组合键会被内核静默丢弃）
+  for (int c = 1; c < KEY_MAX; c++) ioctl(ufd, UI_SET_KEYBIT, c);
 
   struct uinput_user_dev uidev;
   memset(&uidev, 0, sizeof uidev);
@@ -73,7 +75,8 @@ int main(int argc, char** argv)
     const char* a = argv[i];
     fprintf(lg, "arg[%d]=%s\n", i, a); fflush(lg);
     if (a[0] == 'W' && a[1] == ':') {
-      for (int t = 0; t < 1000 && access(a + 2, F_OK) != 0; t++) msleep(10);
+      // W:<file> 等文件出现（至多 300s：分步黑盒测试的人工核帧间隔可能较长）
+      for (int t = 0; t < 30000 && access(a + 2, F_OK) != 0; t++) msleep(10);
       fprintf(lg, "W done (t file=%s)\n", access(a + 2, F_OK) == 0 ? "yes" : "no");
     } else if (a[0] == 'S' && a[1] == ':') {
       int ms = atoi(a + 2);

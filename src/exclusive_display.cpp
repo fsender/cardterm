@@ -111,11 +111,6 @@ bool fb_backup()
 
   g_fb_backup.resize(g_fb_len);
   memcpy(g_fb_backup.data(), g_fb_map, g_fb_len);
-  fprintf(stderr, "[exclusive] %s: %ux%u %u bpp, %zu bytes mapped\n",
-          fbdev, var.xres, var.yres, var.bits_per_pixel, g_fb_len);
-  if (var.xres != 320 || var.yres != 170 || var.bits_per_pixel != 16)
-    fprintf(stderr, "[exclusive] WARN: fb geometry %ux%u/%ubpp != expected 320x170/16bpp\n",
-            var.xres, var.yres, var.bits_per_pixel);
   return true;
 }
 
@@ -153,7 +148,6 @@ void grab_keyboards()
     {
       if (ioctl(fd, EVIOCGRAB, 1) == 0)
       {
-        fprintf(stderr, "[exclusive] keyboard grabbed: %s\n", path);
         g_kbd_fds.push_back(fd);
         continue;
       }
@@ -209,7 +203,6 @@ void freeze_applaunch()
 {
   if (applaunch_env::coop_managed())
   {
-    fprintf(stderr, "[exclusive] APPLaunch-managed mode: launcher keeps running (ESC kill fallback live)\n");
     return;
   }
   for (pid_t p : find_applaunch_pids())
@@ -217,7 +210,6 @@ void freeze_applaunch()
     if (kill(p, SIGSTOP) == 0)
     {
       g_frozen_pids.push_back(p);
-      fprintf(stderr, "[exclusive] APPLaunch frozen (SIGSTOP, pid %d)\n", (int)p);
     }
   }
   if (!g_frozen_pids.empty()) usleep(100000);   // let its last frame settle
@@ -227,8 +219,7 @@ void thaw_applaunch()
 {
   for (pid_t p : g_frozen_pids)
   {
-    if (kill(p, SIGCONT) == 0)
-      fprintf(stderr, "[exclusive] APPLaunch resumed (SIGCONT, pid %d)\n", (int)p);
+    (void)kill(p, SIGCONT);
   }
   g_frozen_pids.clear();
 }
@@ -275,7 +266,6 @@ bool acquire(bool grab_keyboard)
 
   if (!lock_display())
   {
-    fprintf(stderr, "[exclusive] another display session is active (lock busy)\n");
     return false;
   }
 
@@ -294,8 +284,6 @@ bool acquire(bool grab_keyboard)
   // （fb 备份 / 冻结 pid 表 / tty fd）。提前 fork 会继承空快照 → 恢复体全空转。
   start_watchdog();
   if (grab_keyboard) grab_keyboards();
-
-  fprintf(stderr, "[exclusive] display + input acquired\n");
   return true;
 }
 
@@ -313,7 +301,6 @@ void release()
   thaw_applaunch();                // 最后才让启动器继续绘制，避免其首帧被 fbcon 覆盖
   if (g_lock_fd >= 0) { flock(g_lock_fd, LOCK_UN); close(g_lock_fd); g_lock_fd = -1; }
   stop_watchdog();                 // 安全网最后停：清理中途被杀仍由 watchdog 兜底
-  fprintf(stderr, "[exclusive] released, everything restored\n");
 }
 
 }  // namespace hw
